@@ -14,7 +14,13 @@ from contextlib import asynccontextmanager
 import json
 import urllib.parse as urlparse
 
-from config import DATABASE_URL, SESSION_TIMEOUT_DAYS, USER_STATUSES, TASK_STATUSES, BOT_PREFIX
+from config import DATABASE_URL, SESSION_TIMEOUT_DAYS, USER_STATUSES, TASK_STATUSES
+
+# Безопасный импорт BOT_PREFIX с fallback
+try:
+    from config import BOT_PREFIX
+except ImportError:
+    BOT_PREFIX = 'get_id_bot'  # Дефолт для Get ID Bot by Mister DMS
 
 logger = logging.getLogger(__name__)
 

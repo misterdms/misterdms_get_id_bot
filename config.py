@@ -2,6 +2,7 @@
 """
 Конфигурация гибридного Topics Scanner Bot
 Содержит все настройки, константы и переменные окружения
+ИСПРАВЛЕНО: Добавлены все недостающие переменные для совместимости
 """
 
 import os
@@ -17,9 +18,10 @@ API_HASH = os.getenv('API_HASH', '')
 if not all([BOT_TOKEN, API_ID, API_HASH]):
     raise ValueError("❌ Не заданы обязательные переменные: BOT_TOKEN, API_ID, API_HASH")
 
-# База данных
+# База данных + ПРЕФИКС ТАБЛИЦ (КРИТИЧНО!)
 DATABASE_URL = os.getenv('DATABASE_URL', 'sqlite:///bot_data.db')
 DATABASE_POOL_SIZE = int(os.getenv('DATABASE_POOL_SIZE', '10'))
+BOT_PREFIX = os.getenv('BOT_PREFIX', 'get_id_bot')  # ДОБАВЛЕНО! Префикс для таблиц
 
 # Шифрование
 ENCRYPTION_KEY = os.getenv('ENCRYPTION_KEY', 'default_32_byte_encryption_key_123')
@@ -46,6 +48,10 @@ LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
 LOG_FORMAT = os.getenv('LOG_FORMAT', 'structured')
 ENABLE_PERFORMANCE_LOGS = os.getenv('ENABLE_PERFORMANCE_LOGS', 'true').lower() == 'true'
 CORRELATION_ID_HEADER = os.getenv('CORRELATION_ID_HEADER', 'X-Request-ID')
+
+# НОВЫЕ ФИЧИ v4.1 - КОМАНДЫ СВЯЗИ
+ADMIN_USER_ID = int(os.getenv('ADMIN_USER_ID', '471560832'))  # ID создателя для /yo_bro
+BUSINESS_CONTACT_ID = int(os.getenv('BUSINESS_CONTACT_ID', '471560832'))  # ID для /buy_bots
 
 # Лимиты API (адаптированы под MTProto API)
 API_LIMITS = {
@@ -110,24 +116,12 @@ QUEUE_PRIORITIES = {
 }
 
 # Статусы пользователей
-USER_STATUSES = {
-    'active': 'Активен',
-    'expired': 'Сессия истекла',
-    'error': 'Ошибка подключения',
-    'blocked': 'Заблокирован',
-    'pending': 'Ожидает активации'
-}
+USER_STATUSES = ['active', 'expired', 'error', 'blocked', 'pending']
 
 # Статусы задач в очереди
-TASK_STATUSES = {
-    'pending': 'Ожидает выполнения',
-    'processing': 'Выполняется',
-    'completed': 'Завершена',
-    'failed': 'Ошибка',
-    'cancelled': 'Отменена'
-}
+TASK_STATUSES = ['pending', 'processing', 'completed', 'failed', 'cancelled']
 
-# Команды бота
+# Команды бота - ОБНОВЛЕНО v4.1
 COMMANDS = {
     'basic': [
         {'command': 'start', 'description': 'Приветствие и выбор режима'},
@@ -154,6 +148,11 @@ COMMANDS = {
         {'command': 'setlimit_normal', 'description': 'Обычный режим'},
         {'command': 'setlimit_burst', 'description': 'Быстрый режим'},
     ],
+    'communication': [  # НОВАЯ КАТЕГОРИЯ v4.1
+        {'command': 'yo_bro', 'description': 'Связь с создателем бота'},
+        {'command': 'buy_bots', 'description': 'Заказ разработки ботов'},
+        {'command': 'donate', 'description': 'Поддержать проект донатом'},
+    ],
     'debug': [
         {'command': 'debug', 'description': 'Диагностическая информация'},
         {'command': 'queue_status', 'description': 'Статус очереди запросов'},
@@ -162,7 +161,7 @@ COMMANDS = {
 
 # Сообщения для пользователей
 MESSAGES = {
-    'welcome': """🤖 **ГИБРИДНЫЙ TOPICS SCANNER BOT v4.0**
+    'welcome': """🤖 **ГИБРИДНЫЙ TOPICS SCANNER BOT v4.1**
 
 👋 Добро пожаловать! Выберите режим работы:
 
@@ -179,7 +178,12 @@ MESSAGES = {
 📋 Основные команды:
 • /scan - сканирование топиков
 • /get_users - активные пользователи
-• /help - подробная справка""",
+• /help - подробная справка
+
+🆕 Новое в v4.1:
+• /yo_bro - связь с создателем
+• /buy_bots - заказ разработки ботов
+• /donate - поддержать проект""",
     
     'user_mode_instructions': """👤 **НАСТРОЙКА ПОЛЬЗОВАТЕЛЬСКОГО РЕЖИМА**
 
@@ -212,7 +216,12 @@ a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6
 • Детальная информация о создателях
 • Нет ограничений Bot API
 
-📋 Команды: /scan, /get_all, /help""",
+📋 Команды: /scan, /get_all, /help
+
+🆕 Новое в v4.1:
+• /yo_bro - связь с создателем
+• /buy_bots - заказ разработки ботов
+• /donate - поддержать проект""",
     
     'queue_notification': """🕐 **ВЫСОКАЯ НАГРУЗКА**
 
@@ -236,7 +245,9 @@ a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6
 💡 Попробуйте:
 • /debug - диагностика
 • /help - справка
-• /faq - частые вопросы"""
+• /faq - частые вопросы
+
+🆕 Или свяжитесь с разработчиком: /yo_bro"""
 }
 
 # Валидаторы
@@ -264,16 +275,18 @@ def setup_logging():
     
     return logger
 
-# Версия приложения
-APP_VERSION = "4.0.0"
+# Версия приложения - ОБНОВЛЕНО
+APP_VERSION = "4.1.0"
 APP_NAME = "Hybrid Topics Scanner Bot"
-APP_DESCRIPTION = "Гибридный бот для сканирования топиков с поддержкой пользовательского режима"
+APP_DESCRIPTION = "Гибридный бот для сканирования топиков с поддержкой пользовательского режима и новыми фичами связи"
 
 # Экспорт всех настроек
 __all__ = [
-    'BOT_TOKEN', 'API_ID', 'API_HASH',
+    'BOT_TOKEN', 'API_ID', 'API_HASH', 'BOT_PREFIX',
     'DATABASE_URL', 'ENCRYPTION_KEY', 'SALT',
     'MAX_CONCURRENT_SESSIONS', 'MAX_QUEUE_SIZE',
+    'SESSION_TIMEOUT_DAYS', 'USER_STATUSES', 'TASK_STATUSES',
+    'ADMIN_USER_ID', 'BUSINESS_CONTACT_ID',
     'API_LIMITS', 'BOT_MODES', 'COMMANDS', 'MESSAGES',
-    'setup_logging', 'APP_VERSION', 'APP_NAME'
+    'setup_logging', 'APP_VERSION', 'APP_NAME', 'QUEUE_PRIORITIES'
 ]
