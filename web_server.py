@@ -2,6 +2,7 @@
 """
 Веб-сервер для мониторинга и health check гибридного Topics Scanner Bot
 Предоставляет REST API для мониторинга состояния системы
+ИСПРАВЛЕНО: Убран aiohttp_cors, добавлен ручной CORS middleware
 """
 
 import json
@@ -10,7 +11,6 @@ from datetime import datetime
 from typing import Dict, Any, Optional
 from aiohttp import web, ClientSession
 from aiohttp.web_runner import AppRunner, TCPSite
-import aiohttp_cors
 
 from config import WEBHOOK_SECRET, APP_VERSION, APP_NAME
 
@@ -32,15 +32,9 @@ class WebServer:
         """Создание веб-приложения"""
         app = web.Application()
         
-        # Настройка CORS
-        cors = aiohttp_cors.setup(app, defaults={
-            "*": aiohttp_cors.ResourceOptions(
-                allow_credentials=True,
-                expose_headers="*",
-                allow_headers="*",
-                allow_methods="*"
-            )
-        })
+        # Ручная настройка CORS middleware (вместо aiohttp_cors)
+        app.middlewares.append(self.cors_middleware)
+        app.middlewares.append(self.logging_middleware)
         
         # Основные эндпоинты
         app.router.add_get('/', self.handle_root)
@@ -60,15 +54,25 @@ class WebServer:
         # Webhook эндпоинты (если нужны)
         app.router.add_post('/webhook', self.handle_webhook)
         
-        # Добавляем CORS ко всем эндпоинтам
-        for route in list(app.router.routes()):
-            cors.add(route)
-        
-        # Middleware для логирования
-        app.middlewares.append(self.logging_middleware)
-        
         self.app = app
         return app
+    
+    @web.middleware
+    async def cors_middleware(self, request, handler):
+        """Ручная реализация CORS вместо aiohttp_cors"""
+        # Обрабатываем preflight запросы
+        if request.method == 'OPTIONS':
+            response = web.Response()
+        else:
+            response = await handler(request)
+        
+        # Добавляем CORS заголовки
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+        response.headers['Access-Control-Allow-Credentials'] = 'true'
+        
+        return response
     
     @web.middleware
     async def logging_middleware(self, request, handler):

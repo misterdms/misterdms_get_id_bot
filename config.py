@@ -2,7 +2,7 @@
 """
 Конфигурация гибридного Topics Scanner Bot
 Содержит все настройки, константы и переменные окружения
-ИСПРАВЛЕНО: Добавлены все недостающие переменные для совместимости
+ИСПРАВЛЕНО: Добавлены все недостающие переменные для совместимости + команды связи
 """
 
 import os
@@ -19,9 +19,13 @@ if not all([BOT_TOKEN, API_ID, API_HASH]):
     raise ValueError("❌ Не заданы обязательные переменные: BOT_TOKEN, API_ID, API_HASH")
 
 # База данных + ПРЕФИКС ТАБЛИЦ (КРИТИЧНО!)
-DATABASE_URL = os.getenv('DATABASE_URL', 'sqlite:///bot_data.db')
+# По умолчанию PostgreSQL для production, SQLite для локальной разработки
+DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://user:password@localhost:5432/hybrid_bots')
 DATABASE_POOL_SIZE = int(os.getenv('DATABASE_POOL_SIZE', '10'))
-BOT_PREFIX = os.getenv('BOT_PREFIX', 'get_id_bot')  # ДОБАВЛЕНО! Префикс для таблиц
+BOT_PREFIX = os.getenv('BOT_PREFIX', 'get_id_bot')  # Префикс для таблиц
+
+# Для локальной разработки можно переопределить в .env:
+# DATABASE_URL=sqlite:///bot_data.db
 
 # Шифрование
 ENCRYPTION_KEY = os.getenv('ENCRYPTION_KEY', 'default_32_byte_encryption_key_123')
@@ -52,6 +56,52 @@ CORRELATION_ID_HEADER = os.getenv('CORRELATION_ID_HEADER', 'X-Request-ID')
 # НОВЫЕ ФИЧИ v4.1 - КОМАНДЫ СВЯЗИ
 ADMIN_USER_ID = int(os.getenv('ADMIN_USER_ID', '471560832'))  # ID создателя для /yo_bro
 BUSINESS_CONTACT_ID = int(os.getenv('BUSINESS_CONTACT_ID', '471560832'))  # ID для /buy_bots
+
+# БЕЗОПАСНОСТЬ И ЛИМИТЫ (ИСПРАВЛЕНО)
+BLACKLIST_USERS = []
+TRUSTED_USERS = []
+ALERT_ADMIN_IDS = []
+
+# Безопасная обработка списков пользователей
+try:
+    blacklist_str = os.getenv('BLACKLIST_USERS', '')
+    if blacklist_str:
+        BLACKLIST_USERS = [s.strip() for s in blacklist_str.split(',') if s.strip()]
+except Exception:
+    BLACKLIST_USERS = []
+
+try:
+    trusted_str = os.getenv('TRUSTED_USERS', '471560832')
+    if trusted_str:
+        TRUSTED_USERS = [s.strip() for s in trusted_str.split(',') if s.strip()]
+except Exception:
+    TRUSTED_USERS = ['471560832']
+
+try:
+    alert_str = os.getenv('ALERT_ADMIN_IDS', '471560832')
+    if alert_str:
+        ALERT_ADMIN_IDS = [s.strip() for s in alert_str.split(',') if s.strip()]
+except Exception:
+    ALERT_ADMIN_IDS = ['471560832']
+
+WHITELIST_ONLY_MODE = os.getenv('WHITELIST_ONLY_MODE', 'false').lower() == 'true'
+
+# ЛИМИТЫ ИСПОЛЬЗОВАНИЯ
+MAX_USERS_PER_HOUR = int(os.getenv('MAX_USERS_PER_HOUR', '100'))
+MAX_DAILY_REQUESTS = int(os.getenv('MAX_DAILY_REQUESTS', '10000'))
+MAX_REQUESTS_PER_USER_DAY = int(os.getenv('MAX_REQUESTS_PER_USER_DAY', '100'))
+MAX_GROUPS_PER_USER_HOUR = int(os.getenv('MAX_GROUPS_PER_USER_HOUR', '5'))
+COOLDOWN_BETWEEN_USERS = int(os.getenv('COOLDOWN_BETWEEN_USERS', '3'))
+
+# РЕЖИМ РАЗРАБОТКИ
+DEVELOPMENT_MODE = os.getenv('DEVELOPMENT_MODE', 'false').lower() == 'true'
+DEBUG = os.getenv('DEBUG', 'false').lower() == 'true'
+
+# АНАЛИТИКА
+ENABLE_USAGE_ANALYTICS = os.getenv('ENABLE_USAGE_ANALYTICS', 'true').lower() == 'true'
+
+# АЛЕРТЫ
+ALERT_TELEGRAM_CHAT = os.getenv('ALERT_TELEGRAM_CHAT', '-1002133156416')
 
 # Лимиты API (адаптированы под MTProto API)
 API_LIMITS = {
@@ -159,7 +209,7 @@ COMMANDS = {
     ]
 }
 
-# Сообщения для пользователей
+# Сообщения для пользователей - РАСШИРЕНО
 MESSAGES = {
     'welcome': """🤖 **ГИБРИДНЫЙ TOPICS SCANNER BOT v4.1**
 
@@ -247,7 +297,84 @@ a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6
 • /help - справка
 • /faq - частые вопросы
 
-🆕 Или свяжитесь с разработчиком: /yo_bro"""
+🆕 Или свяжитесь с разработчиком: /yo_bro""",
+
+    'dev_message': """🔧 **РЕЖИМ РАЗРАБОТКИ**
+
+Сорри, бро, мне тут код правят, я ща не работаю, приболел, так сказать, решаю проблемы с цифровым здоровьем, ахахах 😅
+
+🛠️ **Что происходит:**
+• Обновление функций сканирования
+• Оптимизация базы данных  
+• Исправление багов
+
+⏰ **Примерное время:** 15-30 минут
+💬 **Вопросы:** @MisterDMS""",
+    
+    # НОВЫЕ СООБЩЕНИЯ v4.1 - КОМАНДЫ СВЯЗИ
+    'yo_bro': f"""👋 **Связь с создателем бота**
+
+Привет! Это прямая связь с @MisterDMS - создателем Get ID Bot.
+
+📞 **Контакты:**
+• Telegram: @MisterDMS
+• User ID: {ADMIN_USER_ID}
+
+💬 **О чем можно писать:**
+• Баги и ошибки в работе бота
+• Предложения новых функций
+• Вопросы по использованию
+• Техническая поддержка
+
+🤝 **Коммерческие вопросы:** используйте /buy_bots
+
+⚡ **Обычно отвечаю в течение 2-12 часов**""",
+    
+    'buy_bots': f"""💼 **Заказ разработки ботов**
+
+Нужен свой бот или хотите кастомизировать существующий?
+
+👨‍💻 **Что умею делать:**
+• Telegram боты любой сложности
+• Интеграция с API и базами данных
+• Веб-приложения и дашборды
+• ИИ-интеграция (ChatGPT, Claude)
+• Автоматизация бизнес-процессов
+
+📋 **Примеры работ:**
+• Get ID Bot (Topics Scanner) - этот бот
+• Музыкальные боты с ИИ
+• Боты для интернет-магазинов
+• CRM-системы на базе Telegram
+
+💰 **Стоимость:** от 5,000 до 50,000 рублей
+⏱️ **Сроки:** от 3 дней до 2 недель
+
+📞 **Контакт для заказов:**
+• Telegram: @MisterDMS  
+• User ID: {BUSINESS_CONTACT_ID}
+
+🎯 **Напишите ТЗ и получите оценку стоимости!**""",
+    
+    'donate': """💝 **Поддержать проект донатом**
+
+Если Get ID Bot приносит пользу, можете поддержать разработку!
+
+💳 **Способы доната:**
+• TON: `UQCxS4GUjzxl_TbGQ6YgD-8oF1OEjKQCOz3Ru6KJnkjyEASf`
+• BTC: `bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh`
+• ETH: `0x742d35Cc6339C4532CE5392D2c9B85877a1Bcb1A`
+• USDT (TRC20): `TGwnz8YmUaLLH1EKzRTUaGZULkFHPCLG7c`
+
+🎯 **На что идут средства:**
+• Оплата серверов (Render.com)
+• Развитие новых функций
+• ИИ-интеграция (OpenAI API)
+• Техническая поддержка
+
+💪 **Любая сумма поможет проекту развиваться!**
+
+Спасибо за поддержку! ❤️""",
 }
 
 # Валидаторы
@@ -288,5 +415,8 @@ __all__ = [
     'SESSION_TIMEOUT_DAYS', 'USER_STATUSES', 'TASK_STATUSES',
     'ADMIN_USER_ID', 'BUSINESS_CONTACT_ID',
     'API_LIMITS', 'BOT_MODES', 'COMMANDS', 'MESSAGES',
-    'setup_logging', 'APP_VERSION', 'APP_NAME', 'QUEUE_PRIORITIES'
+    'setup_logging', 'APP_VERSION', 'APP_NAME', 'QUEUE_PRIORITIES',
+    'DEVELOPMENT_MODE', 'BLACKLIST_USERS', 'TRUSTED_USERS',
+    'WHITELIST_ONLY_MODE', 'MAX_REQUESTS_PER_USER_DAY',
+    'COOLDOWN_BETWEEN_USERS', 'ENABLE_USAGE_ANALYTICS'
 ]

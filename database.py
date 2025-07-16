@@ -2,7 +2,7 @@
 """
 Управление базой данных для гибридного Topics Scanner Bot
 Поддерживает SQLite и PostgreSQL с асинхронными операциями
-ОПТИМИЗИРОВАНО: Префиксы таблиц для разделения данных между ботами
+ИСПРАВЛЕНО: PostgreSQL запросы, импорты, валидация
 """
 
 import aiosqlite
@@ -45,6 +45,11 @@ class DatabaseManager:
         
     async def initialize(self):
         """Инициализация базы данных и создание таблиц"""
+        # Валидация префикса
+        valid_prefixes = ['get_id_bot', 'musiremi_bot', 'bot2']
+        if self.bot_prefix not in valid_prefixes:
+            logger.warning(f"⚠️ Нестандартный префикс: {self.bot_prefix}")
+        
         logger.info(f"🗄️ Инициализация базы данных: {self.db_type} (префикс: {self.bot_prefix})")
         
         try:
@@ -66,23 +71,31 @@ class DatabaseManager:
                 yield conn
         else:
             # PostgreSQL поддержка
-            import asyncpg
+            try:
+                import asyncpg
+            except ImportError:
+                logger.error("❌ asyncpg не установлен! Установите: pip install asyncpg")
+                raise
             
             # Парсим DATABASE_URL
             url = urlparse.urlparse(self.database_url)
             
-            conn = await asyncpg.connect(
-                host=url.hostname,
-                port=url.port or 5432,
-                user=url.username,
-                password=url.password,
-                database=url.path[1:] if url.path else 'postgres'
-            )
-            
+            conn = None
             try:
+                conn = await asyncpg.connect(
+                    host=url.hostname,
+                    port=url.port or 5432,
+                    user=url.username,
+                    password=url.password,
+                    database=url.path[1:] if url.path else 'postgres'
+                )
                 yield conn
+            except Exception as e:
+                logger.error(f"❌ Ошибка подключения к PostgreSQL: {e}")
+                raise
             finally:
-                await conn.close()
+                if conn:
+                    await conn.close()
     
     async def migrate_existing_data(self):
         """Миграция данных из таблиц без префиксов (если они существуют)"""
@@ -100,8 +113,8 @@ class DatabaseManager:
                         cursor = await conn.execute(check_query)
                         exists = await cursor.fetchone()
                     else:
-                        check_query = f"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = '{old_table}')"
-                        exists = await conn.fetchval(check_query)
+                        check_query = f"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = $1)"
+                        exists = await conn.fetchval(check_query, old_table)
                     
                     if exists:
                         # Проверяем, есть ли данные в старой таблице
@@ -325,7 +338,7 @@ class DatabaseManager:
     # === УНИВЕРСАЛЬНЫЕ МЕТОДЫ ДЛЯ ОБЕИХ БД ===
     
     async def _execute_query(self, query: str, params: tuple = None, fetch_one: bool = False, fetch_all: bool = False):
-        """Универсальный метод выполнения запросов"""
+        """Универсальный метод выполнения запросов - ИСПРАВЛЕН"""
         async with self.get_connection() as conn:
             if self.db_type == 'sqlite':
                 cursor = await conn.execute(query, params or ())
@@ -340,15 +353,24 @@ class DatabaseManager:
                     await conn.commit()
                     return cursor.rowcount
             else:
-                # PostgreSQL
+                # PostgreSQL - ИСПРАВЛЕНЫ ПАРАМЕТРЫ
                 if fetch_one:
-                    result = await conn.fetchrow(query, *(params or ()))
+                    if params:
+                        result = await conn.fetchrow(query, *params)
+                    else:
+                        result = await conn.fetchrow(query)
                     return dict(result) if result else None
                 elif fetch_all:
-                    rows = await conn.fetch(query, *(params or ()))
+                    if params:
+                        rows = await conn.fetch(query, *params)
+                    else:
+                        rows = await conn.fetch(query)
                     return [dict(row) for row in rows]
                 else:
-                    result = await conn.execute(query, *(params or ()))
+                    if params:
+                        result = await conn.execute(query, *params)
+                    else:
+                        result = await conn.execute(query)
                     return int(result.split()[-1]) if 'UPDATE' in result or 'DELETE' in result else 1
     
     # === УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ ===
