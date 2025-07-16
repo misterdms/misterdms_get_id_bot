@@ -2,7 +2,7 @@
 """
 Объединенные обработчики команд для гибридного Topics Scanner Bot
 Содержит логику для режима бота и пользовательского режима
-ИСПРАВЛЕНО: Правильный импорт TopicScannerFactory, добавлена интеграция с security/analytics
+ИСПРАВЛЕНО: Правильный импорт TopicScannerFactory из utils, добавлена интеграция с security/analytics
 """
 
 import logging
@@ -17,8 +17,7 @@ from telethon.errors import ChatAdminRequiredError, ChannelPrivateError
 
 from config import API_LIMITS, MESSAGES, BOT_MODES
 from database import db_manager
-from topic_scanner import TopicScannerFactory  # ИСПРАВЛЕН ИМПОРТ
-from utils import send_long_message, format_topics_table
+from utils import TopicScannerFactory, send_long_message, format_topics_table  # ИСПРАВЛЕН ИМПОРТ
 
 logger = logging.getLogger(__name__)
 
