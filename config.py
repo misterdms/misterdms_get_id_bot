@@ -19,6 +19,12 @@ if not all([BOT_TOKEN, API_ID, API_HASH]):
 # === БАЗА ДАННЫХ ===
 DATABASE_URL = os.getenv('DATABASE_URL', 'sqlite:///topics_bot.db')
 
+# Проверка на PostgreSQL URL
+if DATABASE_URL and DATABASE_URL.startswith(('postgres://', 'postgresql://')):
+    DB_TYPE = 'postgresql'
+else:
+    DB_TYPE = 'sqlite'
+
 # === ВЕБ-СЕРВЕР ===
 PORT = int(os.getenv('PORT', '10000'))
 
