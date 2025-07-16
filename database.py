@@ -28,8 +28,12 @@ class DatabaseManager:
     """Менеджер базы данных с поддержкой SQLite и PostgreSQL + префиксы таблиц"""
     
     def __init__(self, database_url: str = DATABASE_URL, bot_prefix: str = BOT_PREFIX):
-        # Валидация DATABASE_URL
-        if not database_url or 'user:password@host' in database_url or 'presave_user:password@localhost' in database_url:
+        # Валидация DATABASE_URL с улучшенной проверкой
+        if (not database_url or 
+            'user:password@host' in database_url or 
+            'presave_user:password@localhost' in database_url or
+            database_url == 'postgresql://user:password@host:5432/dbname' or
+            'example.com' in database_url):
             logger.warning("⚠️ Некорректный DATABASE_URL, переключение на SQLite")
             database_url = 'sqlite:///bot_data.db'
         
@@ -46,15 +50,10 @@ class DatabaseManager:
             'bot_logs': f"{self.bot_prefix}_bot_logs"
         }
         
-        logger.info(f"🗄️ DatabaseManager инициализирован с префиксом: {self.bot_prefix}")
+        logger.info(f"🗄️ DatabaseManager инициализирован: {self.db_type} с префиксом {self.bot_prefix}")
         
     async def initialize(self):
         """Инициализация базы данных и создание таблиц"""
-        # Валидация префикса
-        valid_prefixes = ['get_id_bot', 'musiremi_bot', 'bot2']
-        if self.bot_prefix not in valid_prefixes:
-            logger.warning(f"⚠️ Нестандартный префикс: {self.bot_prefix}")
-        
         logger.info(f"🗄️ Инициализация базы данных: {self.db_type} (префикс: {self.bot_prefix})")
         
         try:
@@ -66,7 +65,7 @@ class DatabaseManager:
             logger.error(f"❌ Ошибка инициализации БД: {e}")
             
             # Автофоллбэк на SQLite при проблемах с PostgreSQL
-            if self.db_type == 'postgresql' and ('hostname' in str(e) or 'address' in str(e)):
+            if self.db_type == 'postgresql':
                 logger.warning("🔄 Автофоллбэк на SQLite из-за проблем с PostgreSQL")
                 self.database_url = 'sqlite:///bot_data.db'
                 self.db_type = 'sqlite'
@@ -124,59 +123,6 @@ class DatabaseManager:
             finally:
                 if conn:
                     await conn.close()
-    
-    async def migrate_existing_data(self):
-        """Миграция данных из таблиц без префиксов (если они существуют)"""
-        try:
-            async with self.get_connection() as conn:
-                # Проверяем наличие старых таблиц без префикса
-                old_tables = ['users', 'activity_data', 'request_queue', 'bot_settings', 'bot_logs']
-                
-                for old_table in old_tables:
-                    new_table = self.tables[old_table]
-                    
-                    # Проверяем существование старой таблицы
-                    if self.db_type == 'sqlite':
-                        check_query = f"SELECT name FROM sqlite_master WHERE type='table' AND name='{old_table}'"
-                        cursor = await conn.execute(check_query)
-                        exists = await cursor.fetchone()
-                    else:
-                        check_query = f"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = $1)"
-                        exists = await conn.fetchval(check_query, old_table)
-                    
-                    if exists:
-                        # Проверяем, есть ли данные в старой таблице
-                        count_query = f"SELECT COUNT(*) FROM {old_table}"
-                        if self.db_type == 'sqlite':
-                            cursor = await conn.execute(count_query)
-                            count = (await cursor.fetchone())[0]
-                        else:
-                            count = await conn.fetchval(count_query)
-                        
-                        if count > 0:
-                            logger.info(f"🔄 Миграция данных: {old_table} → {new_table} ({count} записей)")
-                            
-                            # Копируем данные
-                            copy_query = f"INSERT INTO {new_table} SELECT * FROM {old_table}"
-                            
-                            if self.db_type == 'sqlite':
-                                await conn.execute(copy_query)
-                                await conn.commit()
-                            else:
-                                await conn.execute(copy_query)
-                            
-                            # Удаляем старую таблицу
-                            drop_query = f"DROP TABLE {old_table}"
-                            if self.db_type == 'sqlite':
-                                await conn.execute(drop_query)
-                                await conn.commit()
-                            else:
-                                await conn.execute(drop_query)
-                            
-                            logger.info(f"✅ Миграция {old_table} завершена")
-                
-        except Exception as e:
-            logger.debug(f"Миграция данных: {e} (нормально, если таблиц без префикса нет)")
     
     async def create_tables(self):
         """Создание всех необходимых таблиц с префиксами"""
@@ -355,13 +301,64 @@ class DatabaseManager:
                     if self.db_type == 'sqlite':
                         await conn.execute(index_sql)
                     else:
-                        # PostgreSQL
                         await conn.execute(index_sql)
                 except Exception as e:
                     logger.debug(f"Индекс уже существует: {e}")
             
             if self.db_type == 'sqlite':
                 await conn.commit()
+    
+    async def migrate_existing_data(self):
+        """Миграция данных из таблиц без префиксов (если они существуют)"""
+        try:
+            async with self.get_connection() as conn:
+                old_tables = ['users', 'activity_data', 'request_queue', 'bot_settings', 'bot_logs']
+                
+                for old_table in old_tables:
+                    new_table = self.tables[old_table]
+                    
+                    # Проверяем существование старой таблицы
+                    if self.db_type == 'sqlite':
+                        check_query = f"SELECT name FROM sqlite_master WHERE type='table' AND name='{old_table}'"
+                        cursor = await conn.execute(check_query)
+                        exists = await cursor.fetchone()
+                    else:
+                        check_query = f"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = $1)"
+                        exists = await conn.fetchval(check_query, old_table)
+                    
+                    if exists:
+                        # Проверяем, есть ли данные в старой таблице
+                        count_query = f"SELECT COUNT(*) FROM {old_table}"
+                        if self.db_type == 'sqlite':
+                            cursor = await conn.execute(count_query)
+                            count = (await cursor.fetchone())[0]
+                        else:
+                            count = await conn.fetchval(count_query)
+                        
+                        if count > 0:
+                            logger.info(f"🔄 Миграция данных: {old_table} → {new_table} ({count} записей)")
+                            
+                            # Копируем данные
+                            copy_query = f"INSERT INTO {new_table} SELECT * FROM {old_table}"
+                            
+                            if self.db_type == 'sqlite':
+                                await conn.execute(copy_query)
+                                await conn.commit()
+                            else:
+                                await conn.execute(copy_query)
+                            
+                            # Удаляем старую таблицу
+                            drop_query = f"DROP TABLE {old_table}"
+                            if self.db_type == 'sqlite':
+                                await conn.execute(drop_query)
+                                await conn.commit()
+                            else:
+                                await conn.execute(drop_query)
+                            
+                            logger.info(f"✅ Миграция {old_table} завершена")
+                
+        except Exception as e:
+            logger.debug(f"Миграция данных: {e} (нормально, если таблиц без префикса нет)")
     
     # === УНИВЕРСАЛЬНЫЕ МЕТОДЫ ДЛЯ ОБЕИХ БД ===
     
@@ -576,208 +573,6 @@ class DatabaseManager:
                 'date': date.strftime('%d.%m.%Y')
             }
     
-    async def cleanup_old_activity(self, days_to_keep: int = 30) -> int:
-        """Очистка старых данных активности"""
-        cutoff_date = datetime.now().date() - timedelta(days=days_to_keep)
-        
-        query = f"""
-            DELETE FROM {self.tables['activity_data']} WHERE date_tracked < {('$1' if self.db_type == 'postgresql' else '?')}
-        """
-        
-        return await self._execute_query(query, (cutoff_date,))
-    
-    # === ОЧЕРЕДЬ ЗАПРОСОВ ===
-    
-    async def add_to_queue(self, user_id: int, command: str, chat_id: int = None, 
-                          parameters: Dict[str, Any] = None, priority: int = 2) -> int:
-        """Добавить задачу в очередь"""
-        if self.db_type == 'postgresql':
-            query = f"""
-                INSERT INTO {self.tables['request_queue']} 
-                (user_id, chat_id, command, parameters, priority)
-                VALUES ($1, $2, $3, $4, $5)
-                RETURNING id
-            """
-            async with self.get_connection() as conn:
-                result = await conn.fetchval(query, user_id, chat_id, command, json.dumps(parameters) if parameters else None, priority)
-                return result
-        else:
-            query = f"""
-                INSERT INTO {self.tables['request_queue']} 
-                (user_id, chat_id, command, parameters, priority)
-                VALUES (?, ?, ?, ?, ?)
-            """
-            async with self.get_connection() as conn:
-                cursor = await conn.execute(query, (user_id, chat_id, command, json.dumps(parameters) if parameters else None, priority))
-                await conn.commit()
-                return cursor.lastrowid
-    
-    async def get_next_task(self) -> Optional[Dict[str, Any]]:
-        """Получить следующую задачу из очереди"""
-        select_query = f"""
-            SELECT * FROM {self.tables['request_queue']} 
-            WHERE status = 'pending'
-            ORDER BY priority ASC, created_at ASC
-            LIMIT 1
-        """
-        
-        task = await self._execute_query(select_query, fetch_one=True)
-        
-        if task:
-            # Отмечаем как выполняющуюся
-            update_query = f"""
-                UPDATE {self.tables['request_queue']} SET status = 'processing', 
-                started_at = {('$1' if self.db_type == 'postgresql' else '?')}
-                WHERE id = {('$2' if self.db_type == 'postgresql' else '?')}
-            """
-            
-            await self._execute_query(update_query, (datetime.now(), task['id']))
-            
-            if task['parameters']:
-                task['parameters'] = json.loads(task['parameters'])
-            
-            return task
-        
-        return None
-    
-    async def complete_task(self, task_id: int, result: str = None, error: str = None) -> bool:
-        """Завершить задачу"""
-        status = 'completed' if error is None else 'failed'
-        
-        query = f"""
-            UPDATE {self.tables['request_queue']} SET 
-                status = {('$1' if self.db_type == 'postgresql' else '?')}, 
-                completed_at = {('$2' if self.db_type == 'postgresql' else '?')},
-                result = {('$3' if self.db_type == 'postgresql' else '?')},
-                error_message = {('$4' if self.db_type == 'postgresql' else '?')}
-            WHERE id = {('$5' if self.db_type == 'postgresql' else '?')}
-        """
-        
-        await self._execute_query(query, (status, datetime.now(), result, error, task_id))
-        return True
-    
-    async def get_queue_status(self, user_id: int = None) -> Dict[str, Any]:
-        """Получить статус очереди"""
-        # Общая статистика
-        stats_query = f"""
-            SELECT status, COUNT(*) as count FROM {self.tables['request_queue']} 
-            WHERE created_at > {('$1' if self.db_type == 'postgresql' else '?')}
-            GROUP BY status
-        """
-        
-        hour_ago = datetime.now() - timedelta(hours=1)
-        stats_rows = await self._execute_query(stats_query, (hour_ago,), fetch_all=True)
-        
-        status_counts = {row['status']: row['count'] for row in stats_rows}
-        
-        # Позиция пользователя в очереди
-        user_position = None
-        if user_id:
-            position_query = f"""
-                SELECT COUNT(*) + 1 as position FROM {self.tables['request_queue']} 
-                WHERE status = 'pending' AND 
-                      (priority < (SELECT priority FROM {self.tables['request_queue']} WHERE user_id = {('$1' if self.db_type == 'postgresql' else '?')} AND status = 'pending' LIMIT 1)
-                       OR (priority = (SELECT priority FROM {self.tables['request_queue']} WHERE user_id = {('$2' if self.db_type == 'postgresql' else '?')} AND status = 'pending' LIMIT 1)
-                           AND created_at < (SELECT created_at FROM {self.tables['request_queue']} WHERE user_id = {('$3' if self.db_type == 'postgresql' else '?')} AND status = 'pending' LIMIT 1)))
-            """
-            
-            position_result = await self._execute_query(position_query, (user_id, user_id, user_id), fetch_one=True)
-            if position_result and position_result['position'] > 0:
-                user_position = position_result['position']
-        
-        return {
-            'pending': status_counts.get('pending', 0),
-            'processing': status_counts.get('processing', 0),
-            'completed': status_counts.get('completed', 0),
-            'failed': status_counts.get('failed', 0),
-            'user_position': user_position
-        }
-    
-    async def cleanup_old_tasks(self, hours_to_keep: int = 24) -> int:
-        """Очистка старых завершенных задач"""
-        cutoff_time = datetime.now() - timedelta(hours=hours_to_keep)
-        
-        query = f"""
-            DELETE FROM {self.tables['request_queue']} 
-            WHERE status IN ('completed', 'failed') AND completed_at < {('$1' if self.db_type == 'postgresql' else '?')}
-        """
-        
-        return await self._execute_query(query, (cutoff_time,))
-    
-    # === НАСТРОЙКИ БОТА ===
-    
-    async def get_setting(self, key: str) -> Optional[str]:
-        """Получить настройку бота"""
-        query = f"""
-            SELECT value FROM {self.tables['bot_settings']} WHERE key = {('$1' if self.db_type == 'postgresql' else '?')}
-        """
-        
-        result = await self._execute_query(query, (key,), fetch_one=True)
-        return result['value'] if result else None
-    
-    async def set_setting(self, key: str, value: str) -> bool:
-        """Установить настройку бота"""
-        if self.db_type == 'postgresql':
-            query = f"""
-                INSERT INTO {self.tables['bot_settings']} (key, value, updated_at)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (key) DO UPDATE SET
-                    value = EXCLUDED.value,
-                    updated_at = EXCLUDED.updated_at
-            """
-        else:
-            query = f"""
-                INSERT OR REPLACE INTO {self.tables['bot_settings']} (key, value, updated_at)
-                VALUES (?, ?, ?)
-            """
-        
-        await self._execute_query(query, (key, value, datetime.now()))
-        return True
-    
-    # === ЛОГИРОВАНИЕ ===
-    
-    async def log_event(self, level: str, message: str, user_id: int = None, 
-                       chat_id: int = None, command: str = None, metadata: Dict = None) -> bool:
-        """Записать событие в лог"""
-        query = f"""
-            INSERT INTO {self.tables['bot_logs']} 
-            (level, message, user_id, chat_id, command, metadata)
-            VALUES ({('$1' if self.db_type == 'postgresql' else '?')}, 
-                    {('$2' if self.db_type == 'postgresql' else '?')}, 
-                    {('$3' if self.db_type == 'postgresql' else '?')}, 
-                    {('$4' if self.db_type == 'postgresql' else '?')}, 
-                    {('$5' if self.db_type == 'postgresql' else '?')}, 
-                    {('$6' if self.db_type == 'postgresql' else '?')})
-        """
-        
-        await self._execute_query(query, (level, message, user_id, chat_id, command, json.dumps(metadata) if metadata else None))
-        return True
-    
-    async def get_recent_logs(self, limit: int = 100, level: str = None) -> List[Dict[str, Any]]:
-        """Получить последние записи лога"""
-        if level:
-            query = f"""
-                SELECT * FROM {self.tables['bot_logs']} WHERE level = {('$1' if self.db_type == 'postgresql' else '?')}
-                ORDER BY timestamp DESC LIMIT {('$2' if self.db_type == 'postgresql' else '?')}
-            """
-            params = (level, limit)
-        else:
-            query = f"""
-                SELECT * FROM {self.tables['bot_logs']} 
-                ORDER BY timestamp DESC LIMIT {('$1' if self.db_type == 'postgresql' else '?')}
-            """
-            params = (limit,)
-        
-        logs = await self._execute_query(query, params, fetch_all=True)
-        
-        for log_entry in logs:
-            if log_entry['metadata']:
-                log_entry['metadata'] = json.loads(log_entry['metadata'])
-        
-        return logs
-    
-    # === СИСТЕМНЫЕ ОПЕРАЦИИ ===
-    
     async def get_database_stats(self) -> Dict[str, Any]:
         """Получить статистику базы данных"""
         stats = {}
@@ -812,14 +607,6 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"❌ Health check БД неудачен: {e}")
             return False
-    
-    def get_table_prefix_info(self) -> Dict[str, str]:
-        """Получить информацию о префиксах таблиц"""
-        return {
-            'bot_prefix': self.bot_prefix,
-            'tables': self.tables.copy(),
-            'db_type': self.db_type
-        }
 
 # Глобальный экземпляр менеджера БД
 db_manager = DatabaseManager()

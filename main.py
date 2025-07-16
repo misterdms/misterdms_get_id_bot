@@ -2,14 +2,7 @@
 """
 🤖 Гибридный Topics Scanner Bot v4.1
 Точка входа приложения с поддержкой режимов бота и пользователя
-ИСПРАВЛЕНО: Исправлены импорты, улучшена инициализация, добавлена интеграция безопасности
-
-Архитектура:
-- Режим бота: ограниченные возможности Bot API
-- Режим пользователя: полный доступ через MTProto API
-- Многопользовательский режим с очередью запросов
-- Безопасное хранение credentials пользователей
-- Система безопасности и аналитики
+ИСПРАВЛЕНО: Интеграция сервисов, импорты, inline кнопки
 """
 
 import asyncio
@@ -18,7 +11,6 @@ import signal
 import sys
 from datetime import datetime
 from telethon import TelegramClient, events
-from telethon.tl.types import KeyboardButtonCallback
 from telethon.tl.custom import Button
 
 # Импорт модулей бота - ИСПРАВЛЕНЫ
@@ -123,8 +115,9 @@ class HybridTopicsBot:
             
             if DEVELOPMENT_MODE and not security_manager.is_trusted_user(event.sender_id):
                 logger.info(f"🔧 Режим разработки: блокирован пользователь {event.sender_id}")
-                await send_long_message(event, MESSAGES['dev_message'])
-                raise events.StopPropagation  # Останавливаем обработку других команд
+                await send_long_message(event, MESSAGES.get('dev_message', 
+                    "🔧 **Режим разработки**\n\nБот временно недоступен для обновлений."))
+                raise events.StopPropagation
         
         # === ПРОВЕРКА БЕЗОПАСНОСТИ ===
         @self.bot_client.on(events.NewMessage)
@@ -138,7 +131,6 @@ class HybridTopicsBot:
             if not is_allowed:
                 logger.warning(f"🚫 Доступ запрещен для {event.sender_id}: {message}")
                 await send_long_message(event, message)
-                # Записываем блокировку в аналитику
                 analytics.track_error(event.sender_id, 'access_denied', message)
                 raise events.StopPropagation
 
@@ -149,7 +141,7 @@ class HybridTopicsBot:
         
         @self.bot_client.on(events.NewMessage(pattern='/start'))
         async def start_handler(event):
-            """Стартовая команда с выбором режима"""
+            """Стартовая команда с inline кнопками - ИСПРАВЛЕНО"""
             try:
                 user_id = event.sender_id
                 chat_type = 'private' if event.is_private else 'group'
@@ -157,8 +149,7 @@ class HybridTopicsBot:
                 sender = event.sender
                 
                 # Аналитика
-                correlation_id = analytics.track_command(user_id, '/start', 
-                                                       'private' if event.is_private else 'group')
+                correlation_id = analytics.track_command(user_id, '/start', chat_type)
                 
                 # Обновляем информацию о пользователе
                 await db_manager.create_or_update_user(
@@ -168,7 +159,7 @@ class HybridTopicsBot:
                 )
                 
                 if event.is_private:
-                    # В ЛС показываем выбор режима
+                    # В ЛС показываем выбор режима с inline кнопками
                     await self._show_mode_selection(event)
                 else:
                     # В группах - работа в выбранном режиме
@@ -180,16 +171,17 @@ class HybridTopicsBot:
                 
                 # Успешная аналитика
                 analytics.track_event('start_completed', user_id, 
-                                     {'success': True}, correlation_id)
+                                     {'success': True, 'chat_type': chat_type}, correlation_id)
                 
             except Exception as e:
                 logger.error(f"❌ Ошибка в start_handler: {e}")
                 analytics.track_error(event.sender_id, 'start_error', str(e))
-                await send_long_message(event, MESSAGES['error_general'].format(error_message=str(e)))
+                await send_long_message(event, MESSAGES.get('error_general', 
+                    "❌ Произошла ошибка: {error_message}").format(error_message=str(e)))
         
         @self.bot_client.on(events.CallbackQuery)
         async def callback_handler(event):
-            """Обработчик inline кнопок"""
+            """Обработчик inline кнопок - ИСПРАВЛЕНО"""
             try:
                 data = event.data.decode('utf-8')
                 user_id = event.sender_id
@@ -213,7 +205,10 @@ class HybridTopicsBot:
             except Exception as e:
                 logger.error(f"❌ Ошибка в callback_handler: {e}")
                 analytics.track_error(event.sender_id, 'callback_error', str(e))
-                await send_long_message(event, MESSAGES['error_general'].format(error_message=str(e)))
+                try:
+                    await event.edit("❌ Ошибка обработки кнопки")
+                except:
+                    pass
         
         # === КОМАНДЫ СКАНИРОВАНИЯ ===
         
@@ -279,21 +274,24 @@ class HybridTopicsBot:
         async def yo_bro_handler(event):
             """Связь с создателем"""
             correlation_id = analytics.track_command(event.sender_id, '/yo_bro')
-            await send_long_message(event, MESSAGES['yo_bro'], parse_mode='markdown')
+            await send_long_message(event, MESSAGES.get('yo_bro', 
+                f"👋 Связь с @MisterDMS (ID: {ADMIN_USER_ID})"), parse_mode='markdown')
             analytics.track_event('creator_contact_used', event.sender_id, {}, correlation_id)
         
         @self.bot_client.on(events.NewMessage(pattern='/buy_bots'))
         async def buy_bots_handler(event):
             """Заказ разработки ботов"""
             correlation_id = analytics.track_command(event.sender_id, '/buy_bots')
-            await send_long_message(event, MESSAGES['buy_bots'], parse_mode='markdown')
+            await send_long_message(event, MESSAGES.get('buy_bots', 
+                f"💼 Заказ ботов через @MisterDMS (ID: {BUSINESS_CONTACT_ID})"), parse_mode='markdown')
             analytics.track_event('business_contact_used', event.sender_id, {}, correlation_id)
         
         @self.bot_client.on(events.NewMessage(pattern='/donate'))
         async def donate_handler(event):
             """Информация о донатах"""
             correlation_id = analytics.track_command(event.sender_id, '/donate')
-            await send_long_message(event, MESSAGES['donate'], parse_mode='markdown')
+            await send_long_message(event, MESSAGES.get('donate', 
+                "💝 Информация о донатах доступна"), parse_mode='markdown')
             analytics.track_event('donate_info_viewed', event.sender_id, {}, correlation_id)
         
         # === ИНФОРМАЦИОННЫЕ КОМАНДЫ ===
@@ -376,7 +374,7 @@ class HybridTopicsBot:
                 logger.debug(f"Ошибка обработки credentials: {e}")
     
     async def _route_command(self, event, command: str):
-        """Маршрутизация команды в зависимости от режима пользователя - ИСПРАВЛЕНО"""
+        """Маршрутизация команды в зависимости от режима пользователя"""
         try:
             user_id = event.sender_id
             user_data = await db_manager.get_user(user_id)
@@ -407,7 +405,10 @@ class HybridTopicsBot:
                     position = queue_status.get('pending', 1)
                     estimated_time = f"{position * 30} секунд"
                     
-                    await send_long_message(event, MESSAGES['queue_notification'].format(
+                    queue_msg = MESSAGES.get('queue_notification', 
+                        "🕐 Ваш запрос добавлен в очередь.\nПозиция: {position}\nПримерное время: {estimated_time}")
+                    
+                    await send_long_message(event, queue_msg.format(
                         position=position,
                         estimated_time=estimated_time
                     ))
@@ -435,10 +436,11 @@ class HybridTopicsBot:
         except Exception as e:
             logger.error(f"❌ Ошибка маршрутизации команды {command}: {e}")
             analytics.track_error(event.sender_id, 'command_routing_error', str(e))
-            await send_long_message(event, MESSAGES['error_general'].format(error_message=str(e)))
+            await send_long_message(event, MESSAGES.get('error_general', 
+                "❌ Ошибка: {error_message}").format(error_message=str(e)))
     
     async def _show_mode_selection(self, event):
-        """Показать выбор режима работы"""
+        """Показать выбор режима работы с inline кнопками - ИСПРАВЛЕНО"""
         correlation_id = analytics.track_command(event.sender_id, 'mode_selection_shown')
         
         buttons = [
@@ -448,7 +450,10 @@ class HybridTopicsBot:
             [Button.inline("❓ Частые вопросы", b"show_faq")]
         ]
         
-        await send_long_message(event, MESSAGES['welcome'], buttons=buttons, parse_mode='markdown')
+        welcome_msg = MESSAGES.get('welcome', 
+            "🤖 **ГИБРИДНЫЙ TOPICS SCANNER BOT v4.1**\n\nВыберите режим работы:")
+        
+        await send_long_message(event, welcome_msg, buttons=buttons, parse_mode='markdown')
         
         analytics.track_event('mode_selection_shown', event.sender_id, {}, correlation_id)
     
@@ -457,7 +462,11 @@ class HybridTopicsBot:
         correlation_id = analytics.track_command(user_id, 'bot_mode_selected')
         
         await db_manager.create_or_update_user(user_id, mode='bot')
-        await event.edit(MESSAGES['bot_mode_selected'])
+        
+        bot_mode_msg = MESSAGES.get('bot_mode_selected', 
+            "🤖 **РЕЖИМ БОТА АКТИВИРОВАН**\n\n✅ Быстрый старт без дополнительных настроек")
+        
+        await event.edit(bot_mode_msg, parse_mode='markdown')
         
         analytics.track_event('mode_changed', user_id, {
             'new_mode': 'bot'
@@ -467,13 +476,16 @@ class HybridTopicsBot:
         """Установить режим пользователя"""
         correlation_id = analytics.track_command(user_id, 'user_mode_selected')
         
-        await event.edit(MESSAGES['user_mode_instructions'])
+        user_mode_msg = MESSAGES.get('user_mode_instructions', 
+            "👤 **НАСТРОЙКА ПОЛЬЗОВАТЕЛЬСКОГО РЕЖИМА**\n\nОтправьте API_ID и API_HASH (по одному на строку)")
+        
+        await event.edit(user_mode_msg, parse_mode='markdown')
         await db_manager.create_or_update_user(user_id, mode='bot')  # Временно bot до получения credentials
         
         analytics.track_event('user_mode_instructions_shown', user_id, {}, correlation_id)
     
     async def _process_credentials(self, event, correlation_id: str = ""):
-        """Обработка пользовательских credentials - ИСПРАВЛЕНО"""
+        """Обработка пользовательских credentials"""
         try:
             lines = event.text.strip().split('\n')
             
@@ -491,7 +503,9 @@ class HybridTopicsBot:
             )
             
             if success:
-                await send_long_message(event, MESSAGES['credentials_saved'])
+                credentials_saved_msg = MESSAGES.get('credentials_saved', 
+                    "✅ **ПОЛЬЗОВАТЕЛЬСКИЙ РЕЖИМ АКТИВИРОВАН**\n\n🔐 Ваши credentials сохранены и зашифрованы")
+                await send_long_message(event, credentials_saved_msg)
                 analytics.track_event('credentials_saved_successfully', event.sender_id, {
                     'method': 'manual_input'
                 }, correlation_id)
@@ -502,7 +516,8 @@ class HybridTopicsBot:
         except Exception as e:
             logger.error(f"❌ Ошибка обработки credentials: {e}")
             analytics.track_error(event.sender_id, 'credentials_processing_error', str(e))
-            await send_long_message(event, MESSAGES['error_general'].format(error_message=str(e)))
+            await send_long_message(event, MESSAGES.get('error_general', 
+                "❌ Ошибка: {error_message}").format(error_message=str(e)))
     
     async def _show_user_status(self, event):
         """Показать статус пользователя"""
@@ -515,10 +530,10 @@ class HybridTopicsBot:
             
             response = f"👤 **СТАТУС ПОЛЬЗОВАТЕЛЯ**\n\n"
             response += f"🆔 User ID: `{user_id}`\n"
-            response += f"🔧 Режим: {session_info['mode']}\n"
-            response += f"📊 Статус: {session_info['status']}\n"
-            response += f"🔐 Credentials: {'✅ Есть' if session_info['has_credentials'] else '❌ Нет'}\n"
-            response += f"🔗 Активная сессия: {'✅ Да' if session_info['is_session_active'] else '❌ Нет'}\n\n"
+            response += f"🔧 Режим: {session_info.get('mode', 'неизвестно')}\n"
+            response += f"📊 Статус: {session_info.get('status', 'неизвестно')}\n"
+            response += f"🔐 Credentials: {'✅ Есть' if session_info.get('has_credentials') else '❌ Нет'}\n"
+            response += f"🔗 Активная сессия: {'✅ Да' if session_info.get('is_session_active') else '❌ Нет'}\n\n"
             
             # Лимиты безопасности
             user_limits = security_status.get('user_limits', {})
@@ -537,14 +552,15 @@ class HybridTopicsBot:
             await send_long_message(event, response, parse_mode='markdown')
             
             analytics.track_event('user_status_viewed', user_id, {
-                'mode': session_info['mode'],
-                'has_credentials': session_info['has_credentials']
+                'mode': session_info.get('mode'),
+                'has_credentials': session_info.get('has_credentials')
             }, correlation_id)
             
         except Exception as e:
             logger.error(f"❌ Ошибка получения статуса: {e}")
             analytics.track_error(event.sender_id, 'user_status_error', str(e))
-            await send_long_message(event, MESSAGES['error_general'].format(error_message=str(e)))
+            await send_long_message(event, MESSAGES.get('error_general', 
+                "❌ Ошибка: {error_message}").format(error_message=str(e)))
     
     async def _logout_user(self, event):
         """Выход из пользовательского режима"""
@@ -561,10 +577,11 @@ class HybridTopicsBot:
         except Exception as e:
             logger.error(f"❌ Ошибка logout: {e}")
             analytics.track_error(event.sender_id, 'logout_error', str(e))
-            await send_long_message(event, MESSAGES['error_general'].format(error_message=str(e)))
+            await send_long_message(event, MESSAGES.get('error_general', 
+                "❌ Ошибка: {error_message}").format(error_message=str(e)))
     
     async def _show_stats(self, event):
-        """Показать статистику системы - ИСПРАВЛЕНО"""
+        """Показать статистику системы"""
         try:
             correlation_id = analytics.track_command(event.sender_id, '/stats')
             
@@ -583,9 +600,9 @@ class HybridTopicsBot:
             response = f"📊 **СТАТИСТИКА СИСТЕМЫ**\n\n"
             
             response += f"👥 **Пользователи:**\n"
-            response += f"• Всего: {db_stats['users_count']}\n"
-            response += f"• Активных: {db_stats['active_users']}\n"
-            response += f"• В user режиме: {db_stats['user_mode_users']}\n\n"
+            response += f"• Всего: {db_stats.get('users_count', 0)}\n"
+            response += f"• Активных: {db_stats.get('active_users', 0)}\n"
+            response += f"• В user режиме: {db_stats.get('user_mode_users', 0)}\n\n"
             
             response += f"🔗 **Сессии:**\n"
             response += f"• Активных: {session_stats['total_sessions']}\n"
@@ -593,14 +610,15 @@ class HybridTopicsBot:
             response += f"• Свободно: {session_stats['available_slots']}\n\n"
             
             response += f"📋 **Очередь:**\n"
-            response += f"• Ожидает: {queue_stats['pending']}\n"
-            response += f"• Выполняется: {queue_stats['processing']}\n"
-            response += f"• Завершено: {queue_stats['completed']}\n"
-            response += f"• Ошибок: {queue_stats['failed']}\n\n"
+            response += f"• Ожидает: {queue_stats.get('pending', 0)}\n"
+            response += f"• Выполняется: {queue_stats.get('processing', 0)}\n"
+            response += f"• Завершено: {queue_stats.get('completed', 0)}\n"
+            response += f"• Ошибок: {queue_stats.get('failed', 0)}\n\n"
             
             response += f"🛡️ **Безопасность:**\n"
-            response += f"• Всего запросов: {security_status.get('global_stats', {}).get('total_requests', 0)}\n"
-            response += f"• Заблокировано: {security_status.get('global_stats', {}).get('blocked_requests', 0)}\n\n"
+            global_stats = security_status.get('global_stats', {})
+            response += f"• Всего запросов: {global_stats.get('total_requests', 0)}\n"
+            response += f"• Заблокировано: {global_stats.get('blocked_requests', 0)}\n\n"
             
             response += f"📈 **Активность:**\n"
             response += f"• Записей за сегодня: {db_stats.get('activity_data_count', 0)}\n\n"
@@ -614,14 +632,15 @@ class HybridTopicsBot:
             await send_long_message(event, response, parse_mode='markdown')
             
             analytics.track_event('system_stats_viewed', event.sender_id, {
-                'total_users': db_stats['users_count'],
+                'total_users': db_stats.get('users_count', 0),
                 'active_sessions': session_stats['total_sessions']
             }, correlation_id)
             
         except Exception as e:
             logger.error(f"❌ Ошибка получения статистики: {e}")
             analytics.track_error(event.sender_id, 'stats_error', str(e))
-            await send_long_message(event, MESSAGES['error_general'].format(error_message=str(e)))
+            await send_long_message(event, MESSAGES.get('error_general', 
+                "❌ Ошибка: {error_message}").format(error_message=str(e)))
     
     async def _show_queue_status(self, event):
         """Показать статус очереди"""
@@ -632,10 +651,10 @@ class HybridTopicsBot:
             queue_status = await self.service_manager.queue.get_queue_status()
             
             response = f"📋 **СТАТУС ОЧЕРЕДИ**\n\n"
-            response += f"⏳ Ожидает выполнения: {queue_status['pending']}\n"
-            response += f"🔄 Выполняется: {queue_status['processing']}\n"
-            response += f"✅ Завершено за час: {queue_status['completed']}\n"
-            response += f"❌ Ошибок за час: {queue_status['failed']}\n\n"
+            response += f"⏳ Ожидает выполнения: {queue_status.get('pending', 0)}\n"
+            response += f"🔄 Выполняется: {queue_status.get('processing', 0)}\n"
+            response += f"✅ Завершено за час: {queue_status.get('completed', 0)}\n"
+            response += f"❌ Ошибок за час: {queue_status.get('failed', 0)}\n\n"
             
             user_position = queue_status.get('user_position')
             if user_position:
@@ -648,14 +667,15 @@ class HybridTopicsBot:
             await send_long_message(event, response, parse_mode='markdown')
             
             analytics.track_event('queue_status_viewed', user_id, {
-                'pending': queue_status['pending'],
+                'pending': queue_status.get('pending', 0),
                 'user_position': user_position or 0
             }, correlation_id)
             
         except Exception as e:
             logger.error(f"❌ Ошибка получения статуса очереди: {e}")
             analytics.track_error(event.sender_id, 'queue_status_error', str(e))
-            await send_long_message(event, MESSAGES['error_general'].format(error_message=str(e)))
+            await send_long_message(event, MESSAGES.get('error_general', 
+                "❌ Ошибка: {error_message}").format(error_message=str(e)))
     
     async def _show_commands_help(self, event):
         """Показать справку по командам"""
@@ -858,14 +878,11 @@ Telegram ограничивает доступ ботов к информаци�
                 limiter.set_mode(mode, 'manual')
                 limiter.auto_mode_enabled = False
                 
-                from config import API_LIMITS
-                mode_info = API_LIMITS[mode]
                 status = limiter.get_status()
                 
-                response = f"{mode_info['name']} **РЕЖИМ ЛИМИТОВ**\n\n"
+                response = f"🔧 **{mode.upper()} РЕЖИМ ЛИМИТОВ**\n\n"
                 response += f"• Запросов в час: {status['max_requests_hour']}\n"
                 response += f"• Cooldown: {status['cooldown_seconds']} секунд\n"
-                response += f"• Назначение: {mode_info['description']}\n"
                 response += f"• Автоматический режим: ОТКЛЮЧЕН"
             else:
                 await send_long_message(event, "❌ Неизвестный режим лимитов")
