@@ -14,13 +14,16 @@ from contextlib import asynccontextmanager
 import json
 import urllib.parse as urlparse
 
-from config import DATABASE_URL, SESSION_TIMEOUT_DAYS, USER_STATUSES, TASK_STATUSES
-
-# Безопасный импорт BOT_PREFIX с fallback
+# Безопасные импорты
 try:
-    from config import BOT_PREFIX
+    from config import DATABASE_URL, SESSION_TIMEOUT_DAYS, USER_STATUSES, TASK_STATUSES, BOT_PREFIX
 except ImportError:
-    BOT_PREFIX = 'get_id_bot'  # Дефолт для Get ID Bot by Mister DMS
+    # Fallback значения если config недоступен
+    DATABASE_URL = 'sqlite:///bot_data.db'
+    SESSION_TIMEOUT_DAYS = 7
+    USER_STATUSES = ['active', 'expired', 'error', 'blocked', 'pending']
+    TASK_STATUSES = ['pending', 'processing', 'completed', 'failed', 'cancelled']
+    BOT_PREFIX = 'get_id_bot'
 
 logger = logging.getLogger(__name__)
 
@@ -380,29 +383,29 @@ class DatabaseManager:
             else:
                 # PostgreSQL - ИСПРАВЛЕНЫ ПАРАМЕТРЫ
                 if fetch_one:
-                    if params:
-                        result = await conn.fetchrow(query, *params)
-                    else:
-                        result = await conn.fetchrow(query)
+                    result = await conn.fetchrow(query, *(params or ()))
                     return dict(result) if result else None
                 elif fetch_all:
-                    if params:
-                        rows = await conn.fetch(query, *params)
-                    else:
-                        rows = await conn.fetch(query)
+                    rows = await conn.fetch(query, *(params or ()))
                     return [dict(row) for row in rows]
                 else:
-                    if params:
-                        result = await conn.execute(query, *params)
-                    else:
-                        result = await conn.execute(query)
-                    return int(result.split()[-1]) if 'UPDATE' in result or 'DELETE' in result else 1
+                    result = await conn.execute(query, *(params or ()))
+                    # Извлекаем количество затронутых строк
+                    if hasattr(result, 'split'):
+                        # Для INSERT/UPDATE/DELETE результат выглядит как "INSERT 0 1"
+                        parts = result.split()
+                        return int(parts[-1]) if parts else 1
+                    return 1
     
     # === УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ ===
     
     async def get_user(self, user_id: int) -> Optional[Dict[str, Any]]:
         """Получить информацию о пользователе"""
-        query = f"SELECT * FROM {self.tables['users']} WHERE user_id = " + ("$1" if self.db_type == 'postgresql' else "?")
+        if self.db_type == 'postgresql':
+            query = f"SELECT * FROM {self.tables['users']} WHERE user_id = $1"
+        else:
+            query = f"SELECT * FROM {self.tables['users']} WHERE user_id = ?"
+        
         return await self._execute_query(query, (user_id,), fetch_one=True)
     
     async def create_or_update_user(self, user_id: int, telegram_username: str = None, 
@@ -431,16 +434,28 @@ class DatabaseManager:
     async def save_user_credentials(self, user_id: int, api_id_encrypted: str, 
                                   api_hash_encrypted: str, session_file: str) -> bool:
         """Сохранить зашифрованные credentials пользователя"""
-        query = f"""
-            UPDATE {self.tables['users']} SET 
-                api_id_encrypted = {('$1' if self.db_type == 'postgresql' else '?')},
-                api_hash_encrypted = {('$2' if self.db_type == 'postgresql' else '?')},
-                session_file = {('$3' if self.db_type == 'postgresql' else '?')},
-                mode = 'user',
-                status = 'active',
-                last_active = {('$4' if self.db_type == 'postgresql' else '?')}
-            WHERE user_id = {('$5' if self.db_type == 'postgresql' else '?')}
-        """
+        if self.db_type == 'postgresql':
+            query = f"""
+                UPDATE {self.tables['users']} SET 
+                    api_id_encrypted = $1,
+                    api_hash_encrypted = $2,
+                    session_file = $3,
+                    mode = 'user',
+                    status = 'active',
+                    last_active = $4
+                WHERE user_id = $5
+            """
+        else:
+            query = f"""
+                UPDATE {self.tables['users']} SET 
+                    api_id_encrypted = ?,
+                    api_hash_encrypted = ?,
+                    session_file = ?,
+                    mode = 'user',
+                    status = 'active',
+                    last_active = ?
+                WHERE user_id = ?
+            """
         
         await self._execute_query(query, (api_id_encrypted, api_hash_encrypted, session_file, datetime.now(), user_id))
         return True
@@ -450,20 +465,30 @@ class DatabaseManager:
         if status not in USER_STATUSES:
             raise ValueError(f"Неверный статус: {status}")
         
-        query = f"""
-            UPDATE {self.tables['users']} SET status = {('$1' if self.db_type == 'postgresql' else '?')}, 
-            last_active = {('$2' if self.db_type == 'postgresql' else '?')}
-            WHERE user_id = {('$3' if self.db_type == 'postgresql' else '?')}
-        """
+        if self.db_type == 'postgresql':
+            query = f"""
+                UPDATE {self.tables['users']} SET status = $1, last_active = $2
+                WHERE user_id = $3
+            """
+        else:
+            query = f"""
+                UPDATE {self.tables['users']} SET status = ?, last_active = ?
+                WHERE user_id = ?
+            """
         
         await self._execute_query(query, (status, datetime.now(), user_id))
         return True
     
     async def get_users_by_mode(self, mode: str) -> List[Dict[str, Any]]:
         """Получить всех пользователей по режиму"""
-        query = f"""
-            SELECT * FROM {self.tables['users']} WHERE mode = {('$1' if self.db_type == 'postgresql' else '?')} AND status = 'active'
-        """
+        if self.db_type == 'postgresql':
+            query = f"""
+                SELECT * FROM {self.tables['users']} WHERE mode = $1 AND status = 'active'
+            """
+        else:
+            query = f"""
+                SELECT * FROM {self.tables['users']} WHERE mode = ? AND status = 'active'
+            """
         
         return await self._execute_query(query, (mode,), fetch_all=True)
     
@@ -471,10 +496,16 @@ class DatabaseManager:
         """Очистка пользователей с истекшими сессиями"""
         expiry_date = datetime.now() - timedelta(days=SESSION_TIMEOUT_DAYS)
         
-        query = f"""
-            UPDATE {self.tables['users']} SET status = 'expired'
-            WHERE last_active < {('$1' if self.db_type == 'postgresql' else '?')} AND status = 'active' AND mode = 'user'
-        """
+        if self.db_type == 'postgresql':
+            query = f"""
+                UPDATE {self.tables['users']} SET status = 'expired'
+                WHERE last_active < $1 AND status = 'active' AND mode = 'user'
+            """
+        else:
+            query = f"""
+                UPDATE {self.tables['users']} SET status = 'expired'
+                WHERE last_active < ? AND status = 'active' AND mode = 'user'
+            """
         
         return await self._execute_query(query, (expiry_date,))
     
@@ -486,39 +517,55 @@ class DatabaseManager:
         today = datetime.now().date()
         
         # Проверяем, есть ли запись за сегодня
-        check_query = f"""
-            SELECT id, message_count FROM {self.tables['activity_data']} 
-            WHERE chat_id = {('$1' if self.db_type == 'postgresql' else '?')} AND 
-                  user_id = {('$2' if self.db_type == 'postgresql' else '?')} AND 
-                  date_tracked = {('$3' if self.db_type == 'postgresql' else '?')}
-        """
+        if self.db_type == 'postgresql':
+            check_query = f"""
+                SELECT id, message_count FROM {self.tables['activity_data']} 
+                WHERE chat_id = $1 AND user_id = $2 AND date_tracked = $3
+            """
+        else:
+            check_query = f"""
+                SELECT id, message_count FROM {self.tables['activity_data']} 
+                WHERE chat_id = ? AND user_id = ? AND date_tracked = ?
+            """
         
         existing = await self._execute_query(check_query, (chat_id, user_id, today), fetch_one=True)
         
         if existing:
             # Обновляем существующую запись
-            update_query = f"""
-                UPDATE {self.tables['activity_data']} SET 
-                    message_count = message_count + 1,
-                    last_activity = {('$1' if self.db_type == 'postgresql' else '?')},
-                    username = COALESCE({('$2' if self.db_type == 'postgresql' else '?')}, username),
-                    first_name = COALESCE({('$3' if self.db_type == 'postgresql' else '?')}, first_name)
-                WHERE id = {('$4' if self.db_type == 'postgresql' else '?')}
-            """
+            if self.db_type == 'postgresql':
+                update_query = f"""
+                    UPDATE {self.tables['activity_data']} SET 
+                        message_count = message_count + 1,
+                        last_activity = $1,
+                        username = COALESCE($2, username),
+                        first_name = COALESCE($3, first_name)
+                    WHERE id = $4
+                """
+            else:
+                update_query = f"""
+                    UPDATE {self.tables['activity_data']} SET 
+                        message_count = message_count + 1,
+                        last_activity = ?,
+                        username = COALESCE(?, username),
+                        first_name = COALESCE(?, first_name)
+                    WHERE id = ?
+                """
             
             await self._execute_query(update_query, (datetime.now(), username, first_name, existing['id']))
         else:
             # Создаем новую запись
-            insert_query = f"""
-                INSERT INTO {self.tables['activity_data']} 
-                (chat_id, user_id, username, first_name, date_tracked, last_activity)
-                VALUES ({('$1' if self.db_type == 'postgresql' else '?')}, 
-                        {('$2' if self.db_type == 'postgresql' else '?')}, 
-                        {('$3' if self.db_type == 'postgresql' else '?')}, 
-                        {('$4' if self.db_type == 'postgresql' else '?')}, 
-                        {('$5' if self.db_type == 'postgresql' else '?')}, 
-                        {('$6' if self.db_type == 'postgresql' else '?')})
-            """
+            if self.db_type == 'postgresql':
+                insert_query = f"""
+                    INSERT INTO {self.tables['activity_data']} 
+                    (chat_id, user_id, username, first_name, date_tracked, last_activity)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                """
+            else:
+                insert_query = f"""
+                    INSERT INTO {self.tables['activity_data']} 
+                    (chat_id, user_id, username, first_name, date_tracked, last_activity)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """
             
             await self._execute_query(insert_query, (chat_id, user_id, username, first_name, today, datetime.now()))
         
@@ -529,12 +576,18 @@ class DatabaseManager:
         if date is None:
             date = datetime.now().date()
         
-        query = f"""
-            SELECT * FROM {self.tables['activity_data']} 
-            WHERE chat_id = {('$1' if self.db_type == 'postgresql' else '?')} AND 
-                  date_tracked = {('$2' if self.db_type == 'postgresql' else '?')}
-            ORDER BY message_count DESC, last_activity DESC
-        """
+        if self.db_type == 'postgresql':
+            query = f"""
+                SELECT * FROM {self.tables['activity_data']} 
+                WHERE chat_id = $1 AND date_tracked = $2
+                ORDER BY message_count DESC, last_activity DESC
+            """
+        else:
+            query = f"""
+                SELECT * FROM {self.tables['activity_data']} 
+                WHERE chat_id = ? AND date_tracked = ?
+                ORDER BY message_count DESC, last_activity DESC
+            """
         
         return await self._execute_query(query, (chat_id, date), fetch_all=True)
     
@@ -543,16 +596,26 @@ class DatabaseManager:
         if date is None:
             date = datetime.now().date()
         
-        query = f"""
-            SELECT 
-                COUNT(*) as total_users,
-                SUM(message_count) as total_messages,
-                MAX(message_count) as max_messages,
-                AVG(message_count) as avg_messages
-            FROM {self.tables['activity_data']} 
-            WHERE chat_id = {('$1' if self.db_type == 'postgresql' else '?')} AND 
-                  date_tracked = {('$2' if self.db_type == 'postgresql' else '?')}
-        """
+        if self.db_type == 'postgresql':
+            query = f"""
+                SELECT 
+                    COUNT(*) as total_users,
+                    SUM(message_count) as total_messages,
+                    MAX(message_count) as max_messages,
+                    AVG(message_count) as avg_messages
+                FROM {self.tables['activity_data']} 
+                WHERE chat_id = $1 AND date_tracked = $2
+            """
+        else:
+            query = f"""
+                SELECT 
+                    COUNT(*) as total_users,
+                    SUM(message_count) as total_messages,
+                    MAX(message_count) as max_messages,
+                    AVG(message_count) as avg_messages
+                FROM {self.tables['activity_data']} 
+                WHERE chat_id = ? AND date_tracked = ?
+            """
         
         result = await self._execute_query(query, (chat_id, date), fetch_one=True)
         
@@ -573,6 +636,59 @@ class DatabaseManager:
                 'date': date.strftime('%d.%m.%Y')
             }
     
+    # === ЗАДАЧИ В ОЧЕРЕДИ ===
+    
+    async def add_task(self, user_id: int, command: str, chat_id: int = None, 
+                      parameters: str = None, priority: int = 2) -> int:
+        """Добавить задачу в очередь"""
+        if self.db_type == 'postgresql':
+            query = f"""
+                INSERT INTO {self.tables['request_queue']} 
+                (user_id, chat_id, command, parameters, priority, status, created_at)
+                VALUES ($1, $2, $3, $4, $5, 'pending', $6)
+                RETURNING id
+            """
+        else:
+            query = f"""
+                INSERT INTO {self.tables['request_queue']} 
+                (user_id, chat_id, command, parameters, priority, status, created_at)
+                VALUES (?, ?, ?, ?, ?, 'pending', ?)
+            """
+        
+        if self.db_type == 'postgresql':
+            result = await self._execute_query(query, (user_id, chat_id, command, parameters, priority, datetime.now()), fetch_one=True)
+            return result['id'] if result else 0
+        else:
+            await self._execute_query(query, (user_id, chat_id, command, parameters, priority, datetime.now()))
+            # Для SQLite получаем последний ID
+            cursor_query = "SELECT last_insert_rowid()"
+            result = await self._execute_query(cursor_query, fetch_one=True)
+            return result['last_insert_rowid()'] if result else 0
+    
+    async def complete_task(self, task_id: int, result: str = None, error: str = None) -> bool:
+        """Завершить задачу"""
+        if self.db_type == 'postgresql':
+            query = f"""
+                UPDATE {self.tables['request_queue']} SET 
+                    status = 'completed',
+                    completed_at = $1,
+                    result = $2,
+                    error_message = $3
+                WHERE id = $4
+            """
+        else:
+            query = f"""
+                UPDATE {self.tables['request_queue']} SET 
+                    status = 'completed',
+                    completed_at = ?,
+                    result = ?,
+                    error_message = ?
+                WHERE id = ?
+            """
+        
+        await self._execute_query(query, (datetime.now(), result, error, task_id))
+        return True
+    
     async def get_database_stats(self) -> Dict[str, Any]:
         """Получить статистику базы данных"""
         stats = {}
@@ -580,29 +696,42 @@ class DatabaseManager:
         # Количество записей в таблицах
         for table_key, table_name in self.tables.items():
             query = f"SELECT COUNT(*) as count FROM {table_name}"
-            result = await self._execute_query(query, fetch_one=True)
-            stats[f'{table_key}_count'] = result['count'] if result else 0
+            try:
+                result = await self._execute_query(query, fetch_one=True)
+                stats[f'{table_key}_count'] = result['count'] if result else 0
+            except Exception as e:
+                logger.debug(f"Ошибка получения статистики для {table_name}: {e}")
+                stats[f'{table_key}_count'] = 0
         
         # Активные пользователи
         active_query = f"""
             SELECT COUNT(*) as count FROM {self.tables['users']} WHERE status = 'active'
         """
-        result = await self._execute_query(active_query, fetch_one=True)
-        stats['active_users'] = result['count'] if result else 0
+        try:
+            result = await self._execute_query(active_query, fetch_one=True)
+            stats['active_users'] = result['count'] if result else 0
+        except:
+            stats['active_users'] = 0
         
         # Пользователи в user mode
         user_mode_query = f"""
             SELECT COUNT(*) as count FROM {self.tables['users']} WHERE mode = 'user' AND status = 'active'
         """
-        result = await self._execute_query(user_mode_query, fetch_one=True)
-        stats['user_mode_users'] = result['count'] if result else 0
+        try:
+            result = await self._execute_query(user_mode_query, fetch_one=True)
+            stats['user_mode_users'] = result['count'] if result else 0
+        except:
+            stats['user_mode_users'] = 0
         
         return stats
     
     async def health_check(self) -> bool:
         """Проверка здоровья базы данных"""
         try:
-            await self._execute_query("SELECT 1", fetch_one=True)
+            if self.db_type == 'postgresql':
+                await self._execute_query("SELECT 1", fetch_one=True)
+            else:
+                await self._execute_query("SELECT 1", fetch_one=True)
             return True
         except Exception as e:
             logger.error(f"❌ Health check БД неудачен: {e}")

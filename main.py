@@ -2,7 +2,7 @@
 """
 🤖 Гибридный Topics Scanner Bot v4.1
 Точка входа приложения с поддержкой режимов бота и пользователя
-ИСПРАВЛЕНО: Передача original_event в очередь, меню после действий, обработка результатов
+ИСПРАВЛЕНО: Безопасные импорты, обработка ошибок, передача original_event в очередь
 """
 
 import asyncio
@@ -10,25 +10,78 @@ import logging
 import signal
 import sys
 from datetime import datetime
+
+# Основные импорты Telegram
 from telethon import TelegramClient, events
 from telethon.tl.custom import Button
 
-# Импорт модулей бота - ИСПРАВЛЕНЫ
-from config import (
-    BOT_TOKEN, API_ID, API_HASH, APP_NAME, APP_VERSION,
-    setup_logging, MESSAGES, PORT, RENDER_EXTERNAL_URL,
-    DEVELOPMENT_MODE, ADMIN_USER_ID, BUSINESS_CONTACT_ID
-)
-from database import init_database, db_manager
-from auth_manager import auth_manager, cleanup_auth
-from web_server import create_web_server
-from handlers import CommandHandler
-from services import service_manager
+# Безопасные импорты модулей бота
+try:
+    from config import (
+        BOT_TOKEN, API_ID, API_HASH, APP_NAME, APP_VERSION,
+        setup_logging, MESSAGES, PORT, RENDER_EXTERNAL_URL,
+        DEVELOPMENT_MODE, ADMIN_USER_ID, BUSINESS_CONTACT_ID
+    )
+except ImportError as e:
+    print(f"❌ Ошибка импорта config: {e}")
+    sys.exit(1)
 
-# ИСПРАВЛЕНО: Добавлены импорты security и analytics
-from security import security_manager
-from analytics import analytics
-from utils import send_long_message
+try:
+    from database import init_database, db_manager
+except ImportError as e:
+    print(f"❌ Ошибка импорта database: {e}")
+    sys.exit(1)
+
+try:
+    from auth_manager import auth_manager, cleanup_auth
+except ImportError as e:
+    print(f"❌ Ошибка импорта auth_manager: {e}")
+    sys.exit(1)
+
+try:
+    from handlers import CommandHandler
+except ImportError as e:
+    print(f"❌ Ошибка импорта handlers: {e}")
+    sys.exit(1)
+
+try:
+    from services import service_manager
+except ImportError as e:
+    print(f"❌ Ошибка импорта services: {e}")
+    sys.exit(1)
+
+try:
+    from utils import send_long_message, MessageUtils
+except ImportError as e:
+    print(f"❌ Ошибка импорта utils: {e}")
+    # Fallback функция для отправки сообщений
+    async def send_long_message(event, text, **kwargs):
+        try:
+            await event.reply(text, **kwargs)
+        except Exception as ex:
+            print(f"Ошибка отправки сообщения: {ex}")
+
+# Опциональные импорты
+try:
+    from web_server import create_web_server
+    web_server_available = True
+except ImportError as e:
+    print(f"⚠️ Веб-сервер недоступен: {e}")
+    web_server_available = False
+
+try:
+    from security import security_manager
+    security_available = True
+except ImportError as e:
+    print(f"⚠️ Система безопасности недоступна: {e}")
+    security_available = False
+
+try:
+    from analytics import analytics
+    analytics_available = True
+except ImportError as e:
+    print(f"⚠️ Аналитика недоступна: {e}")
+    analytics_available = False
 
 # Настройка логирования
 logger = setup_logging()
@@ -86,7 +139,7 @@ class HybridTopicsBot:
             self._register_event_handlers()
             
             # Запуск веб-сервера
-            if RENDER_EXTERNAL_URL:
+            if web_server_available and RENDER_EXTERNAL_URL:
                 await self._start_web_server()
             
             # Запуск фоновых задач
@@ -113,11 +166,20 @@ class HybridTopicsBot:
             if event.text and event.text.startswith('/debug'):
                 return
             
-            if DEVELOPMENT_MODE and not security_manager.is_trusted_user(event.sender_id):
-                logger.info(f"🔧 Режим разработки: блокирован пользователь {event.sender_id}")
-                await send_long_message(event, MESSAGES.get('dev_message', 
-                    "🔧 **Режим разработки**\n\nБот временно недоступен для обновлений."))
-                raise events.StopPropagation
+            if DEVELOPMENT_MODE:
+                if security_available:
+                    if not security_manager.is_trusted_user(event.sender_id):
+                        logger.info(f"🔧 Режим разработки: блокирован пользователь {event.sender_id}")
+                        await send_long_message(event, MESSAGES.get('dev_message', 
+                            "🔧 **Режим разработки**\n\nБот временно недоступен для обновлений."))
+                        raise events.StopPropagation
+                else:
+                    # Если security недоступен, блокируем всех кроме админа
+                    if event.sender_id != ADMIN_USER_ID:
+                        logger.info(f"🔧 Режим разработки: блокирован пользователь {event.sender_id}")
+                        await send_long_message(event, MESSAGES.get('dev_message', 
+                            "🔧 **Режим разработки**\n\nБот временно недоступен для обновлений."))
+                        raise events.StopPropagation
         
         # === ПРОВЕРКА БЕЗОПАСНОСТИ ===
         @self.bot_client.on(events.NewMessage)
@@ -126,14 +188,16 @@ class HybridTopicsBot:
             # Пропускаем системные команды
             if event.text and event.text.startswith('/debug'):
                 return
-                
-            is_allowed, message = security_manager.is_user_allowed(event.sender_id)
-            if not is_allowed:
-                logger.warning(f"🚫 Доступ запрещен для {event.sender_id}: {message}")
-                await send_long_message(event, message)
-                analytics.track_error(event.sender_id, 'access_denied', message)
-                raise events.StopPropagation
-
+            
+            if security_available:
+                is_allowed, message = security_manager.is_user_allowed(event.sender_id)
+                if not is_allowed:
+                    logger.warning(f"🚫 Доступ запрещен для {event.sender_id}: {message}")
+                    await send_long_message(event, message)
+                    if analytics_available:
+                        analytics.track_error(event.sender_id, 'access_denied', message)
+                    raise events.StopPropagation
+            
             # Логируем разрешенный запрос
             logger.debug(f"✅ Доступ разрешен для {event.sender_id}")
         
@@ -149,7 +213,9 @@ class HybridTopicsBot:
                 sender = event.sender
                 
                 # Аналитика
-                correlation_id = analytics.track_command(user_id, '/start', chat_type)
+                correlation_id = ""
+                if analytics_available:
+                    correlation_id = analytics.track_command(user_id, '/start', chat_type)
                 
                 # Обновляем информацию о пользователе
                 await db_manager.create_or_update_user(
@@ -170,12 +236,14 @@ class HybridTopicsBot:
                         await self.command_handler.handle_start(event, 'bot')
                 
                 # Успешная аналитика
-                analytics.track_event('start_completed', user_id, 
-                                     {'success': True, 'chat_type': chat_type}, correlation_id)
+                if analytics_available:
+                    analytics.track_event('start_completed', user_id, 
+                                         {'success': True, 'chat_type': chat_type}, correlation_id)
                 
             except Exception as e:
                 logger.error(f"❌ Ошибка в start_handler: {e}")
-                analytics.track_error(event.sender_id, 'start_error', str(e))
+                if analytics_available:
+                    analytics.track_error(event.sender_id, 'start_error', str(e))
                 await send_long_message(event, MESSAGES.get('error_general', 
                     "❌ Произошла ошибка: {error_message}").format(error_message=str(e)))
         
@@ -187,7 +255,9 @@ class HybridTopicsBot:
                 user_id = event.sender_id
                 
                 # Аналитика callback
-                correlation_id = analytics.track_command(user_id, f'callback_{data}')
+                correlation_id = ""
+                if analytics_available:
+                    correlation_id = analytics.track_command(user_id, f'callback_{data}')
                 
                 if data == 'mode_bot':
                     await self._set_bot_mode(event, user_id)
@@ -208,12 +278,14 @@ class HybridTopicsBot:
                     await self._show_mode_selection(event)
                 
                 # Успешная аналитика
-                analytics.track_event('callback_completed', user_id, 
-                                     {'callback_data': data}, correlation_id)
+                if analytics_available:
+                    analytics.track_event('callback_completed', user_id, 
+                                         {'callback_data': data}, correlation_id)
                 
             except Exception as e:
                 logger.error(f"❌ Ошибка в callback_handler: {e}")
-                analytics.track_error(event.sender_id, 'callback_error', str(e))
+                if analytics_available:
+                    analytics.track_error(event.sender_id, 'callback_error', str(e))
                 try:
                     await event.edit("❌ Ошибка обработки кнопки")
                 except:
@@ -246,26 +318,34 @@ class HybridTopicsBot:
         @self.bot_client.on(events.NewMessage(pattern='/switch_mode'))
         async def switch_mode_handler(event):
             """Переключение режима"""
-            correlation_id = analytics.track_command(event.sender_id, '/switch_mode')
+            correlation_id = ""
+            if analytics_available:
+                correlation_id = analytics.track_command(event.sender_id, '/switch_mode')
             
             if event.is_private:
                 await self._show_mode_selection(event)
-                analytics.track_event('mode_switch_opened', event.sender_id, {}, correlation_id)
+                if analytics_available:
+                    analytics.track_event('mode_switch_opened', event.sender_id, {}, correlation_id)
             else:
                 await send_long_message(event, "⚠️ Переключение режима доступно только в личных сообщениях")
-                analytics.track_error(event.sender_id, 'switch_mode_wrong_chat', 'Попытка в группе')
+                if analytics_available:
+                    analytics.track_error(event.sender_id, 'switch_mode_wrong_chat', 'Попытка в группе')
         
         @self.bot_client.on(events.NewMessage(pattern='/renew_my_api_hash'))
         async def renew_credentials_handler(event):
             """Обновление API credentials"""
-            correlation_id = analytics.track_command(event.sender_id, '/renew_my_api_hash')
+            correlation_id = ""
+            if analytics_available:
+                correlation_id = analytics.track_command(event.sender_id, '/renew_my_api_hash')
             
             if event.is_private:
                 await self._set_user_mode(event, event.sender_id)
-                analytics.track_event('credentials_renewal_started', event.sender_id, {}, correlation_id)
+                if analytics_available:
+                    analytics.track_event('credentials_renewal_started', event.sender_id, {}, correlation_id)
             else:
                 await send_long_message(event, "⚠️ Обновление credentials доступно только в личных сообщениях")
-                analytics.track_error(event.sender_id, 'renew_credentials_wrong_chat', 'Попытка в группе')
+                if analytics_available:
+                    analytics.track_error(event.sender_id, 'renew_credentials_wrong_chat', 'Попытка в группе')
         
         @self.bot_client.on(events.NewMessage(pattern='/my_status'))
         async def my_status_handler(event):
@@ -282,26 +362,41 @@ class HybridTopicsBot:
         @self.bot_client.on(events.NewMessage(pattern='/yo_bro'))
         async def yo_bro_handler(event):
             """Связь с создателем"""
-            correlation_id = analytics.track_command(event.sender_id, '/yo_bro')
+            correlation_id = ""
+            if analytics_available:
+                correlation_id = analytics.track_command(event.sender_id, '/yo_bro')
+            
             await send_long_message(event, MESSAGES.get('yo_bro', 
                 f"👋 Связь с @MisterDMS (ID: {ADMIN_USER_ID})"), parse_mode='markdown')
-            analytics.track_event('creator_contact_used', event.sender_id, {}, correlation_id)
+            
+            if analytics_available:
+                analytics.track_event('creator_contact_used', event.sender_id, {}, correlation_id)
         
         @self.bot_client.on(events.NewMessage(pattern='/buy_bots'))
         async def buy_bots_handler(event):
             """Заказ разработки ботов"""
-            correlation_id = analytics.track_command(event.sender_id, '/buy_bots')
+            correlation_id = ""
+            if analytics_available:
+                correlation_id = analytics.track_command(event.sender_id, '/buy_bots')
+            
             await send_long_message(event, MESSAGES.get('buy_bots', 
                 f"💼 Заказ ботов через @MisterDMS (ID: {BUSINESS_CONTACT_ID})"), parse_mode='markdown')
-            analytics.track_event('business_contact_used', event.sender_id, {}, correlation_id)
+            
+            if analytics_available:
+                analytics.track_event('business_contact_used', event.sender_id, {}, correlation_id)
         
         @self.bot_client.on(events.NewMessage(pattern='/donate'))
         async def donate_handler(event):
             """Информация о донатах"""
-            correlation_id = analytics.track_command(event.sender_id, '/donate')
+            correlation_id = ""
+            if analytics_available:
+                correlation_id = analytics.track_command(event.sender_id, '/donate')
+            
             await send_long_message(event, MESSAGES.get('donate', 
                 "💝 Информация о донатах доступна"), parse_mode='markdown')
-            analytics.track_event('donate_info_viewed', event.sender_id, {}, correlation_id)
+            
+            if analytics_available:
+                analytics.track_event('donate_info_viewed', event.sender_id, {}, correlation_id)
         
         # === ИНФОРМАЦИОННЫЕ КОМАНДЫ ===
         
@@ -376,7 +471,9 @@ class HybridTopicsBot:
                     not user_data.get('api_id_encrypted')):
                     
                     # Пытаемся обработать как credentials
-                    correlation_id = analytics.track_command(event.sender_id, 'credentials_input')
+                    correlation_id = ""
+                    if analytics_available:
+                        correlation_id = analytics.track_command(event.sender_id, 'credentials_input')
                     await self._process_credentials(event, correlation_id)
                 
             except Exception as e:
@@ -389,8 +486,10 @@ class HybridTopicsBot:
             user_data = await db_manager.get_user(user_id)
             
             # Аналитика команды
-            correlation_id = analytics.track_command(user_id, command, 
-                                                   'private' if event.is_private else 'group')
+            correlation_id = ""
+            if analytics_available:
+                correlation_id = analytics.track_command(user_id, command, 
+                                                       'private' if event.is_private else 'group')
             
             if user_data and user_data['mode'] == 'user':
                 # ИСПРАВЛЕНО: Добавляем в очередь для пользовательского режима с original_event
@@ -423,35 +522,41 @@ class HybridTopicsBot:
                         estimated_time=estimated_time
                     ))
                     
-                    analytics.track_event('queue_notification_sent', user_id, {
-                        'position': position,
-                        'command': command
-                    }, correlation_id)
+                    if analytics_available:
+                        analytics.track_event('queue_notification_sent', user_id, {
+                            'position': position,
+                            'command': command
+                        }, correlation_id)
                 else:
                     await send_long_message(event, "🔄 **Задача добавлена в очередь** - выполнение начнется в ближайшее время...")
                     
-                analytics.track_event('command_queued', user_id, {
-                    'command': command,
-                    'task_id': task_id
-                }, correlation_id)
+                if analytics_available:
+                    analytics.track_event('command_queued', user_id, {
+                        'command': command,
+                        'task_id': task_id
+                    }, correlation_id)
             else:
                 # Обрабатываем в режиме бота напрямую (без очереди)
                 success = await self.command_handler.route_command(command, event, 'bot')
                 
-                analytics.track_event('command_executed_bot_mode', user_id, {
-                    'command': command,
-                    'success': success
-                }, correlation_id)
+                if analytics_available:
+                    analytics.track_event('command_executed_bot_mode', user_id, {
+                        'command': command,
+                        'success': success
+                    }, correlation_id)
                 
         except Exception as e:
             logger.error(f"❌ Ошибка маршрутизации команды {command}: {e}")
-            analytics.track_error(event.sender_id, 'command_routing_error', str(e))
+            if analytics_available:
+                analytics.track_error(event.sender_id, 'command_routing_error', str(e))
             await send_long_message(event, MESSAGES.get('error_general', 
                 "❌ Ошибка: {error_message}").format(error_message=str(e)))
     
     async def _show_mode_selection(self, event):
         """Показать выбор режима работы с inline кнопками - ИСПРАВЛЕНО"""
-        correlation_id = analytics.track_command(event.sender_id, 'mode_selection_shown')
+        correlation_id = ""
+        if analytics_available:
+            correlation_id = analytics.track_command(event.sender_id, 'mode_selection_shown')
         
         buttons = [
             [Button.inline("🤖 Режим бота (быстрый старт)", b"mode_bot")],
@@ -472,7 +577,8 @@ class HybridTopicsBot:
         except:
             await send_long_message(event, welcome_msg, buttons=buttons, parse_mode='markdown')
         
-        analytics.track_event('mode_selection_shown', event.sender_id, {}, correlation_id)
+        if analytics_available:
+            analytics.track_event('mode_selection_shown', event.sender_id, {}, correlation_id)
     
     async def _show_mode_selection_after_action(self, event):
         """Показать меню после действия - НОВОЕ"""
@@ -487,7 +593,9 @@ class HybridTopicsBot:
     
     async def _set_bot_mode(self, event, user_id: int):
         """Установить режим бота - ИСПРАВЛЕНО"""
-        correlation_id = analytics.track_command(user_id, 'bot_mode_selected')
+        correlation_id = ""
+        if analytics_available:
+            correlation_id = analytics.track_command(user_id, 'bot_mode_selected')
         
         await db_manager.create_or_update_user(user_id, mode='bot')
         
@@ -496,13 +604,16 @@ class HybridTopicsBot:
         
         await event.edit(bot_mode_msg, parse_mode='markdown')
         
-        analytics.track_event('mode_changed', user_id, {
-            'new_mode': 'bot'
-        }, correlation_id)
+        if analytics_available:
+            analytics.track_event('mode_changed', user_id, {
+                'new_mode': 'bot'
+            }, correlation_id)
     
     async def _set_user_mode(self, event, user_id: int):
         """Установить режим пользователя - ИСПРАВЛЕНО"""
-        correlation_id = analytics.track_command(user_id, 'user_mode_selected')
+        correlation_id = ""
+        if analytics_available:
+            correlation_id = analytics.track_command(user_id, 'user_mode_selected')
         
         user_mode_msg = MESSAGES.get('user_mode_instructions', 
             "👤 **НАСТРОЙКА ПОЛЬЗОВАТЕЛЬСКОГО РЕЖИМА**\n\nОтправьте API_ID и API_HASH (по одному на строку)")
@@ -510,7 +621,8 @@ class HybridTopicsBot:
         await event.edit(user_mode_msg, parse_mode='markdown')
         await db_manager.create_or_update_user(user_id, mode='bot')  # Временно bot до получения credentials
         
-        analytics.track_event('user_mode_instructions_shown', user_id, {}, correlation_id)
+        if analytics_available:
+            analytics.track_event('user_mode_instructions_shown', user_id, {}, correlation_id)
     
     async def _process_credentials(self, event, correlation_id: str = ""):
         """Обработка пользовательских credentials - ИСПРАВЛЕНО"""
@@ -519,7 +631,8 @@ class HybridTopicsBot:
             
             if len(lines) != 2:
                 await send_long_message(event, "❌ Неверный формат. Нужно 2 строки:\n1. API_ID\n2. API_HASH")
-                analytics.track_error(event.sender_id, 'credentials_wrong_format', 'Неверное количество строк')
+                if analytics_available:
+                    analytics.track_error(event.sender_id, 'credentials_wrong_format', 'Неверное количество строк')
                 return
             
             api_id = lines[0].strip()
@@ -538,16 +651,19 @@ class HybridTopicsBot:
                 # ИСПРАВЛЕНО: Показываем меню после успешного сохранения
                 await self._show_mode_selection_after_action(event)
                 
-                analytics.track_event('credentials_saved_successfully', event.sender_id, {
-                    'method': 'manual_input'
-                }, correlation_id)
+                if analytics_available:
+                    analytics.track_event('credentials_saved_successfully', event.sender_id, {
+                        'method': 'manual_input'
+                    }, correlation_id)
             else:
                 await send_long_message(event, f"❌ {message}\n\nПопробуйте еще раз или используйте /renew_my_api_hash")
-                analytics.track_error(event.sender_id, 'credentials_save_failed', message)
+                if analytics_available:
+                    analytics.track_error(event.sender_id, 'credentials_save_failed', message)
             
         except Exception as e:
             logger.error(f"❌ Ошибка обработки credentials: {e}")
-            analytics.track_error(event.sender_id, 'credentials_processing_error', str(e))
+            if analytics_available:
+                analytics.track_error(event.sender_id, 'credentials_processing_error', str(e))
             await send_long_message(event, MESSAGES.get('error_general', 
                 "❌ Ошибка: {error_message}").format(error_message=str(e)))
     
@@ -555,10 +671,15 @@ class HybridTopicsBot:
         """Показать статус пользователя"""
         try:
             user_id = event.sender_id
-            correlation_id = analytics.track_command(user_id, '/my_status')
+            correlation_id = ""
+            if analytics_available:
+                correlation_id = analytics.track_command(user_id, '/my_status')
             
             session_info = await auth_manager.get_session_info(user_id)
-            security_status = security_manager.get_security_status(user_id)
+            
+            security_status = {}
+            if security_available:
+                security_status = security_manager.get_security_status(user_id)
             
             response = f"👤 **СТАТУС ПОЛЬЗОВАТЕЛЯ**\n\n"
             response += f"🆔 User ID: `{user_id}`\n"
@@ -568,11 +689,12 @@ class HybridTopicsBot:
             response += f"🔗 Активная сессия: {'✅ Да' if session_info.get('is_session_active') else '❌ Нет'}\n\n"
             
             # Лимиты безопасности
-            user_limits = security_status.get('user_limits', {})
-            response += f"🛡️ **БЕЗОПАСНОСТЬ:**\n"
-            response += f"• Запросов сегодня: {user_limits.get('requests_today', 0)}\n"
-            response += f"• Доверенный: {'✅' if user_limits.get('is_trusted', False) else '❌'}\n"
-            response += f"• Cooldown: {user_limits.get('cooldown_remaining', 0):.0f}с\n\n"
+            if security_available:
+                user_limits = security_status.get('user_limits', {})
+                response += f"🛡️ **БЕЗОПАСНОСТЬ:**\n"
+                response += f"• Запросов сегодня: {user_limits.get('requests_today', 0)}\n"
+                response += f"• Доверенный: {'✅' if user_limits.get('is_trusted', False) else '❌'}\n"
+                response += f"• Cooldown: {user_limits.get('cooldown_remaining', 0):.0f}с\n\n"
             
             if session_info.get('telegram_user'):
                 tg_user = session_info['telegram_user']
@@ -583,137 +705,48 @@ class HybridTopicsBot:
             
             await send_long_message(event, response, parse_mode='markdown')
             
-            analytics.track_event('user_status_viewed', user_id, {
-                'mode': session_info.get('mode'),
-                'has_credentials': session_info.get('has_credentials')
-            }, correlation_id)
+            if analytics_available:
+                analytics.track_event('user_status_viewed', user_id, {
+                    'mode': session_info.get('mode'),
+                    'has_credentials': session_info.get('has_credentials')
+                }, correlation_id)
             
         except Exception as e:
             logger.error(f"❌ Ошибка получения статуса: {e}")
-            analytics.track_error(event.sender_id, 'user_status_error', str(e))
+            if analytics_available:
+                analytics.track_error(event.sender_id, 'user_status_error', str(e))
             await send_long_message(event, MESSAGES.get('error_general', 
                 "❌ Ошибка: {error_message}").format(error_message=str(e)))
     
     async def _logout_user(self, event):
         """Выход из пользовательского режима"""
         try:
-            correlation_id = analytics.track_command(event.sender_id, '/logout')
+            correlation_id = ""
+            if analytics_available:
+                correlation_id = analytics.track_command(event.sender_id, '/logout')
             
             success, message = await auth_manager.logout_user(event.sender_id)
             await send_long_message(event, message)
             
-            analytics.track_event('user_logout', event.sender_id, {
-                'success': success
-            }, correlation_id)
+            if analytics_available:
+                analytics.track_event('user_logout', event.sender_id, {
+                    'success': success
+                }, correlation_id)
             
         except Exception as e:
             logger.error(f"❌ Ошибка logout: {e}")
-            analytics.track_error(event.sender_id, 'logout_error', str(e))
+            if analytics_available:
+                analytics.track_error(event.sender_id, 'logout_error', str(e))
             await send_long_message(event, MESSAGES.get('error_general', 
                 "❌ Ошибка: {error_message}").format(error_message=str(e)))
     
-    async def _show_stats(self, event):
-        """Показать статистику системы"""
-        try:
-            correlation_id = analytics.track_command(event.sender_id, '/stats')
-            
-            # Статистика БД
-            db_stats = await db_manager.get_database_stats()
-            
-            # Статистика сессий
-            session_stats = await auth_manager.get_active_sessions_count()
-            
-            # Статистика очереди
-            queue_stats = await self.service_manager.queue.get_queue_status()
-            
-            # Статистика безопасности
-            security_status = security_manager.get_security_status()
-            
-            response = f"📊 **СТАТИСТИКА СИСТЕМЫ**\n\n"
-            
-            response += f"👥 **Пользователи:**\n"
-            response += f"• Всего: {db_stats.get('users_count', 0)}\n"
-            response += f"• Активных: {db_stats.get('active_users', 0)}\n"
-            response += f"• В user режиме: {db_stats.get('user_mode_users', 0)}\n\n"
-            
-            response += f"🔗 **Сессии:**\n"
-            response += f"• Активных: {session_stats['total_sessions']}\n"
-            response += f"• Максимум: {session_stats['max_sessions']}\n"
-            response += f"• Свободно: {session_stats['available_slots']}\n\n"
-            
-            response += f"📋 **Очередь:**\n"
-            response += f"• Ожидает: {queue_stats.get('pending', 0)}\n"
-            response += f"• Выполняется: {queue_stats.get('processing', 0)}\n"
-            response += f"• Завершено: {queue_stats.get('completed', 0)}\n"
-            response += f"• Ошибок: {queue_stats.get('failed', 0)}\n\n"
-            
-            response += f"🛡️ **Безопасность:**\n"
-            global_stats = security_status.get('global_stats', {})
-            response += f"• Всего запросов: {global_stats.get('total_requests', 0)}\n"
-            response += f"• Заблокировано: {global_stats.get('blocked_requests', 0)}\n\n"
-            
-            response += f"📈 **Активность:**\n"
-            response += f"• Записей за сегодня: {db_stats.get('activity_data_count', 0)}\n\n"
-            
-            if self.startup_time:
-                uptime = datetime.now() - self.startup_time
-                response += f"⏱️ **Время работы:** {uptime}\n"
-            
-            response += f"🔧 **Версия:** {APP_VERSION}"
-            
-            await send_long_message(event, response, parse_mode='markdown')
-            
-            analytics.track_event('system_stats_viewed', event.sender_id, {
-                'total_users': db_stats.get('users_count', 0),
-                'active_sessions': session_stats['total_sessions']
-            }, correlation_id)
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения статистики: {e}")
-            analytics.track_error(event.sender_id, 'stats_error', str(e))
-            await send_long_message(event, MESSAGES.get('error_general', 
-                "❌ Ошибка: {error_message}").format(error_message=str(e)))
-    
-    async def _show_queue_status(self, event):
-        """Показать статус очереди"""
-        try:
-            user_id = event.sender_id
-            correlation_id = analytics.track_command(user_id, '/queue_status')
-            
-            queue_status = await self.service_manager.queue.get_queue_status()
-            
-            response = f"📋 **СТАТУС ОЧЕРЕДИ**\n\n"
-            response += f"⏳ Ожидает выполнения: {queue_status.get('pending', 0)}\n"
-            response += f"🔄 Выполняется: {queue_status.get('processing', 0)}\n"
-            response += f"✅ Завершено за час: {queue_status.get('completed', 0)}\n"
-            response += f"❌ Ошибок за час: {queue_status.get('failed', 0)}\n\n"
-            
-            user_position = queue_status.get('user_position')
-            if user_position:
-                response += f"👤 **Ваша позиция в очереди:** {user_position}\n"
-                estimated_time = user_position * 30
-                response += f"⏱️ **Примерное время ожидания:** {estimated_time} секунд\n"
-            else:
-                response += f"👤 **У вас нет задач в очереди**\n"
-            
-            await send_long_message(event, response, parse_mode='markdown')
-            
-            analytics.track_event('queue_status_viewed', user_id, {
-                'pending': queue_status.get('pending', 0),
-                'user_position': user_position or 0
-            }, correlation_id)
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения статуса очереди: {e}")
-            analytics.track_error(event.sender_id, 'queue_status_error', str(e))
-            await send_long_message(event, MESSAGES.get('error_general', 
-                "❌ Ошибка: {error_message}").format(error_message=str(e)))
-    
-    async def _show_commands_help(self, event):
-        """Показать справку по командам"""
-        correlation_id = analytics.track_command(event.sender_id, 'commands_help_shown')
+    async def _show_help(self, event):
+        """Показать справку"""
+        correlation_id = ""
+        if analytics_available:
+            correlation_id = analytics.track_command(event.sender_id, '/help')
         
-        help_text = """📋 **КОМАНДЫ БОТА**
+        help_text = f"""📋 **СПРАВКА ПО КОМАНДАМ**
 
 🔍 **Сканирование:**
 • /scan, /list - сканирование топиков
@@ -744,61 +777,18 @@ class HybridTopicsBot:
 • /buy_bots - заказ разработки
 • /donate - поддержать проект
 
-💡 **Совет:** Для полной функциональности используйте режим пользователя!"""
+💡 **Версия:** {APP_VERSION}"""
         
-        await event.edit(help_text, parse_mode='markdown')
-        
-        analytics.track_event('commands_help_viewed', event.sender_id, {}, correlation_id)
-    
-    async def _show_help(self, event):
-        """Показать справку по командам"""
-        correlation_id = analytics.track_command(event.sender_id, '/help')
-        
-        help_text = f"""🤖 **TOPICS SCANNER BOT - СПРАВКА**
-
-**🎯 Режимы работы:**
-🤖 **Режим бота** - быстрый старт с ограничениями Bot API
-👤 **Режим пользователя** - полный доступ через MTProto API
-
-**🔍 Команды сканирования:**
-• `/scan`, `/list` - сканирование топиков
-• `/get_all` - все данные (топики + активность)
-• `/get_users` - активные пользователи за сегодня
-• `/get_ids` - повторное сканирование ID
-
-**⚙️ Управление:**
-• `/switch_mode` - переключить режим работы
-• `/stats` - статистика бота
-• `/help` - эта справка
-• `/faq` - частые вопросы
-
-**💬 Связь (НОВОЕ v4.1):**
-• `/yo_bro` - связь с создателем
-• `/buy_bots` - заказ разработки ботов
-• `/donate` - поддержать проект
-
-**🔧 Лимиты API:**
-• `/setlimit_auto` - автоматический режим
-• `/setlimit_turtle` - медленный режим (🐢)
-• `/setlimit_normal` - обычный режим (⚡)
-• `/setlimit_burst` - быстрый режим (🚀)
-
-**💡 Рекомендация:**
-Для полного доступа ко всем топикам используйте:
-`/switch_mode` → Пользовательский режим
-
-**🔧 Техническая информация:**
-• Версия: v{APP_VERSION} (Hybrid Edition)
-• Поддержка: форумы, супергруппы
-• Отслеживание активности: включено"""
-
         await send_long_message(event, help_text, parse_mode='markdown')
         
-        analytics.track_event('help_viewed', event.sender_id, {}, correlation_id)
+        if analytics_available:
+            analytics.track_event('help_viewed', event.sender_id, {}, correlation_id)
     
     async def _show_faq(self, event):
         """Показать FAQ"""
-        correlation_id = analytics.track_command(event.sender_id, '/faq')
+        correlation_id = ""
+        if analytics_available:
+            correlation_id = analytics.track_command(event.sender_id, '/faq')
         
         faq_text = """❓ **ЧАСТЫЕ ВОПРОСЫ**
 
@@ -822,31 +812,90 @@ Telegram ограничивает доступ ботов к информаци�
 • При >500 участников → черепаший режим
 • Защита от блокировок Telegram
 
-**5. 👥 Как работает отслеживание активности?**
-• Автоматически фиксирует все сообщения
-• Подсчитывает количество сообщений за день
-• Данные сбрасываются каждый день в 00:00
-• Команды бота не считаются активностью
-
-**6. 💬 Как связаться с разработчиком? (НОВОЕ)**
+**5. 💬 Как связаться с разработчиком?**
 • `/yo_bro` - прямая связь с создателем
 • `/buy_bots` - заказ разработки ботов
 • `/donate` - поддержать проект
 
-💡 **Совет:** Для максимальной функциональности используйте пользовательский режим через `/switch_mode`"""
+💡 **Для максимальной функциональности используйте пользовательский режим!**"""
 
         await send_long_message(event, faq_text, parse_mode='markdown')
         
-        analytics.track_event('faq_viewed', event.sender_id, {}, correlation_id)
+        if analytics_available:
+            analytics.track_event('faq_viewed', event.sender_id, {}, correlation_id)
     
     async def _show_faq_inline(self, event):
         """FAQ для inline кнопок"""
         await self._show_faq(event)
     
-    async def _show_debug(self, event):
-        """Отладочная информация"""
+    async def _show_commands_help(self, event):
+        """Показать справку по командам"""
+        await self._show_help(event)
+    
+    async def _show_stats(self, event):
+        """Показать статистику системы"""
         try:
-            correlation_id = analytics.track_command(event.sender_id, '/debug')
+            correlation_id = ""
+            if analytics_available:
+                correlation_id = analytics.track_command(event.sender_id, '/stats')
+            
+            # Статистика БД
+            db_stats = await db_manager.get_database_stats()
+            
+            # Статистика сессий
+            session_stats = await auth_manager.get_active_sessions_count()
+            
+            # Статистика очереди
+            queue_stats = await self.service_manager.queue.get_queue_status()
+            
+            response = f"📊 **СТАТИСТИКА СИСТЕМЫ**\n\n"
+            
+            response += f"👥 **Пользователи:**\n"
+            response += f"• Всего: {db_stats.get('users_count', 0)}\n"
+            response += f"• Активных: {db_stats.get('active_users', 0)}\n"
+            response += f"• В user режиме: {db_stats.get('user_mode_users', 0)}\n\n"
+            
+            response += f"🔗 **Сессии:**\n"
+            response += f"• Активных: {session_stats['total_sessions']}\n"
+            response += f"• Максимум: {session_stats['max_sessions']}\n"
+            response += f"• Свободно: {session_stats['available_slots']}\n\n"
+            
+            response += f"📋 **Очередь:**\n"
+            response += f"• Ожидает: {queue_stats.get('pending', 0)}\n"
+            response += f"• Выполняется: {queue_stats.get('processing', 0)}\n"
+            response += f"• Завершено: {queue_stats.get('completed', 0)}\n"
+            response += f"• Ошибок: {queue_stats.get('failed', 0)}\n\n"
+            
+            response += f"📈 **Активность:**\n"
+            response += f"• Записей за сегодня: {db_stats.get('activity_data_count', 0)}\n\n"
+            
+            if self.startup_time:
+                uptime = datetime.now() - self.startup_time
+                response += f"⏱️ **Время работы:** {uptime}\n"
+            
+            response += f"🔧 **Версия:** {APP_VERSION}"
+            
+            await send_long_message(event, response, parse_mode='markdown')
+            
+            if analytics_available:
+                analytics.track_event('system_stats_viewed', event.sender_id, {
+                    'total_users': db_stats.get('users_count', 0),
+                    'active_sessions': session_stats['total_sessions']
+                }, correlation_id)
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения статистики: {e}")
+            if analytics_available:
+                analytics.track_error(event.sender_id, 'stats_error', str(e))
+            await send_long_message(event, MESSAGES.get('error_general', 
+                "❌ Ошибка: {error_message}").format(error_message=str(e)))
+    
+    async def _show_debug(self, event):
+        """Показать отладочную информацию"""
+        try:
+            correlation_id = ""
+            if analytics_available:
+                correlation_id = analytics.track_command(event.sender_id, '/debug')
             
             if event.is_private:
                 await send_long_message(event, "⚠️ **Эта команда работает только в супергруппах!**")
@@ -877,15 +926,49 @@ Telegram ограничивает доступ ботов к информаци�
             
             await send_long_message(event, response, parse_mode='markdown')
             
-            analytics.track_event('debug_info_viewed', event.sender_id, {
-                'chat_id': event.chat_id,
-                'overall_healthy': health['overall_healthy']
-            }, correlation_id)
+            if analytics_available:
+                analytics.track_event('debug_info_viewed', event.sender_id, {
+                    'chat_id': event.chat_id,
+                    'overall_healthy': health['overall_healthy']
+                }, correlation_id)
             
         except Exception as e:
             logger.error(f"❌ Ошибка в debug: {e}")
-            analytics.track_error(event.sender_id, 'debug_error', str(e))
+            if analytics_available:
+                analytics.track_error(event.sender_id, 'debug_error', str(e))
             await send_long_message(event, f"❌ Ошибка получения отладочной информации: {str(e)}")
+    
+    async def _show_queue_status(self, event):
+        """Показать статус очереди"""
+        try:
+            user_id = event.sender_id
+            correlation_id = ""
+            if analytics_available:
+                correlation_id = analytics.track_command(user_id, '/queue_status')
+            
+            queue_status = await self.service_manager.queue.get_queue_status()
+            
+            response = f"📋 **СТАТУС ОЧЕРЕДИ**\n\n"
+            response += f"⏳ Ожидает выполнения: {queue_status.get('pending', 0)}\n"
+            response += f"🔄 Выполняется: {queue_status.get('processing', 0)}\n"
+            response += f"✅ Завершено за час: {queue_status.get('completed', 0)}\n"
+            response += f"❌ Ошибок за час: {queue_status.get('failed', 0)}\n\n"
+            
+            response += f"👤 **У вас нет задач в очереди**\n"
+            
+            await send_long_message(event, response, parse_mode='markdown')
+            
+            if analytics_available:
+                analytics.track_event('queue_status_viewed', user_id, {
+                    'pending': queue_status.get('pending', 0)
+                }, correlation_id)
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения статуса очереди: {e}")
+            if analytics_available:
+                analytics.track_error(event.sender_id, 'queue_status_error', str(e))
+            await send_long_message(event, MESSAGES.get('error_general', 
+                "❌ Ошибка: {error_message}").format(error_message=str(e)))
     
     async def _handle_setlimit(self, event):
         """Обработка команд лимитов"""
@@ -895,7 +978,9 @@ Telegram ограничивает доступ ботов к информаци�
                 return False
             
             mode = command_text.split('/setlimit_')[1].strip()
-            correlation_id = analytics.track_command(event.sender_id, f'/setlimit_{mode}')
+            correlation_id = ""
+            if analytics_available:
+                correlation_id = analytics.track_command(event.sender_id, f'/setlimit_{mode}')
             
             limiter = self.service_manager.limiter
             
@@ -918,19 +1003,22 @@ Telegram ограничивает доступ ботов к информаци�
                 response += f"• Автоматический режим: ОТКЛЮЧЕН"
             else:
                 await send_long_message(event, "❌ Неизвестный режим лимитов")
-                analytics.track_error(event.sender_id, 'unknown_limit_mode', mode)
+                if analytics_available:
+                    analytics.track_error(event.sender_id, 'unknown_limit_mode', mode)
                 return
             
             await send_long_message(event, response, parse_mode='markdown')
             
-            analytics.track_event('limit_mode_changed', event.sender_id, {
-                'new_mode': mode,
-                'auto_mode': limiter.auto_mode_enabled
-            }, correlation_id)
+            if analytics_available:
+                analytics.track_event('limit_mode_changed', event.sender_id, {
+                    'new_mode': mode,
+                    'auto_mode': limiter.auto_mode_enabled
+                }, correlation_id)
             
         except Exception as e:
             logger.error(f"❌ Ошибка в setlimit: {e}")
-            analytics.track_error(event.sender_id, 'setlimit_error', str(e))
+            if analytics_available:
+                analytics.track_error(event.sender_id, 'setlimit_error', str(e))
             await send_long_message(event, f"❌ Ошибка: {str(e)}")
     
     async def _start_web_server(self):
@@ -955,13 +1043,16 @@ Telegram ограничивает доступ ботов к информаци�
         
         try:
             # Записываем событие завершения
-            analytics.track_event('bot_shutdown', 0, {
-                'uptime_seconds': (datetime.now() - self.startup_time).total_seconds() if self.startup_time else 0
-            })
+            if analytics_available:
+                analytics.track_event('bot_shutdown', 0, {
+                    'uptime_seconds': (datetime.now() - self.startup_time).total_seconds() if self.startup_time else 0
+                })
             
             # Очищаем старые данные
-            security_manager.cleanup_old_data()
-            analytics.cleanup_old_data()
+            if security_available:
+                security_manager.cleanup_old_data()
+            if analytics_available:
+                analytics.cleanup_old_data()
             
             # Закрытие всех сервисов
             await self.service_manager.cleanup()
@@ -989,10 +1080,11 @@ Telegram ограничивает доступ ботов к информаци�
             logger.info("🎯 Бот запущен и готов к работе!")
             
             # Записываем успешный запуск
-            analytics.track_event('bot_startup', 0, {
-                'version': APP_VERSION,
-                'development_mode': DEVELOPMENT_MODE
-            })
+            if analytics_available:
+                analytics.track_event('bot_startup', 0, {
+                    'version': APP_VERSION,
+                    'development_mode': DEVELOPMENT_MODE
+                })
             
             # Основной цикл
             await self.bot_client.run_until_disconnected()
@@ -1001,7 +1093,8 @@ Telegram ограничивает доступ ботов к информаци�
             logger.info("⏹️ Получен сигнал остановки")
         except Exception as e:
             logger.error(f"❌ Критическая ошибка: {e}")
-            analytics.track_error(0, 'critical_bot_error', str(e))
+            if analytics_available:
+                analytics.track_error(0, 'critical_bot_error', str(e))
             raise
         finally:
             await self.shutdown()
@@ -1025,7 +1118,8 @@ async def main():
         await bot.run()
     except Exception as e:
         logger.error(f"❌ Критическая ошибка в main: {e}")
-        analytics.track_error(0, 'main_critical_error', str(e))
+        if analytics_available:
+            analytics.track_error(0, 'main_critical_error', str(e))
         sys.exit(1)
 
 if __name__ == '__main__':
