@@ -2,7 +2,7 @@
 """
 Управление базой данных для гибридного Topics Scanner Bot
 Поддерживает SQLite и PostgreSQL с асинхронными операциями
-ИСПРАВЛЕНО: PostgreSQL запросы, импорты, валидация, fallback на SQLite
+ИСПРАВЛЕНО: PostgreSQL параметры, fallback логика, безопасность
 """
 
 import aiosqlite
@@ -16,7 +16,9 @@ import urllib.parse as urlparse
 
 # Безопасные импорты
 try:
-    from config import DATABASE_URL, SESSION_TIMEOUT_DAYS, USER_STATUSES, TASK_STATUSES, BOT_PREFIX
+    from config import DATABASE_URL, SESSION_TIMEOUT_DAYS, BOT_PREFIX
+    USER_STATUSES = ['active', 'expired', 'error', 'blocked', 'pending']
+    TASK_STATUSES = ['pending', 'processing', 'completed', 'failed', 'cancelled']
 except ImportError:
     # Fallback значения если config недоступен
     DATABASE_URL = 'sqlite:///bot_data.db'
@@ -301,10 +303,7 @@ class DatabaseManager:
             
             for index_sql in indexes:
                 try:
-                    if self.db_type == 'sqlite':
-                        await conn.execute(index_sql)
-                    else:
-                        await conn.execute(index_sql)
+                    await conn.execute(index_sql)
                 except Exception as e:
                     logger.debug(f"Индекс уже существует: {e}")
             
@@ -401,10 +400,11 @@ class DatabaseManager:
     
     async def get_user(self, user_id: int) -> Optional[Dict[str, Any]]:
         """Получить информацию о пользователе"""
+        query = f"SELECT * FROM {self.tables['users']} WHERE user_id = "
         if self.db_type == 'postgresql':
-            query = f"SELECT * FROM {self.tables['users']} WHERE user_id = $1"
+            query += "$1"
         else:
-            query = f"SELECT * FROM {self.tables['users']} WHERE user_id = ?"
+            query += "?"
         
         return await self._execute_query(query, (user_id,), fetch_one=True)
     
@@ -648,22 +648,20 @@ class DatabaseManager:
                 VALUES ($1, $2, $3, $4, $5, 'pending', $6)
                 RETURNING id
             """
+            result = await self._execute_query(query, (user_id, chat_id, command, parameters, priority, datetime.now()), fetch_one=True)
+            return result['id'] if result else 0
         else:
             query = f"""
                 INSERT INTO {self.tables['request_queue']} 
                 (user_id, chat_id, command, parameters, priority, status, created_at)
                 VALUES (?, ?, ?, ?, ?, 'pending', ?)
             """
-        
-        if self.db_type == 'postgresql':
-            result = await self._execute_query(query, (user_id, chat_id, command, parameters, priority, datetime.now()), fetch_one=True)
-            return result['id'] if result else 0
-        else:
             await self._execute_query(query, (user_id, chat_id, command, parameters, priority, datetime.now()))
-            # Для SQLite получаем последний ID
-            cursor_query = "SELECT last_insert_rowid()"
-            result = await self._execute_query(cursor_query, fetch_one=True)
-            return result['last_insert_rowid()'] if result else 0
+            
+            # Получаем последний ID для SQLite
+            last_id_query = "SELECT last_insert_rowid() as id"
+            result = await self._execute_query(last_id_query, fetch_one=True)
+            return result['id'] if result else 0
     
     async def complete_task(self, task_id: int, result: str = None, error: str = None) -> bool:
         """Завершить задачу"""
