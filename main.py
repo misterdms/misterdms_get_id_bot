@@ -122,6 +122,7 @@ class HybridTopicsBot:
                 return
             
             if DEVELOPMENT_MODE and not security_manager.is_trusted_user(event.sender_id):
+                logger.info(f"🔧 Режим разработки: блокирован пользователь {event.sender_id}")
                 await send_long_message(event, MESSAGES['dev_message'])
                 raise events.StopPropagation  # Останавливаем обработку других команд
         
@@ -135,14 +136,14 @@ class HybridTopicsBot:
                 
             is_allowed, message = security_manager.is_user_allowed(event.sender_id)
             if not is_allowed:
+                logger.warning(f"🚫 Доступ запрещен для {event.sender_id}: {message}")
                 await send_long_message(event, message)
                 # Записываем блокировку в аналитику
                 analytics.track_error(event.sender_id, 'access_denied', message)
                 raise events.StopPropagation
-            
-            # Записываем запрос
-            security_manager.record_request(event.sender_id, event.text or 'message', 
-                                          'private' if event.is_private else 'group')
+
+            # Логируем разрешенный запрос
+            logger.debug(f"✅ Доступ разрешен для {event.sender_id}")
         
         # === ОСНОВНЫЕ КОМАНДЫ ===
         
@@ -151,6 +152,8 @@ class HybridTopicsBot:
             """Стартовая команда с выбором режима"""
             try:
                 user_id = event.sender_id
+                chat_type = 'private' if event.is_private else 'group'
+                logger.info(f"🚀 /start от пользователя {user_id} в {chat_type}")
                 sender = event.sender
                 
                 # Аналитика
@@ -445,7 +448,7 @@ class HybridTopicsBot:
             [Button.inline("❓ Частые вопросы", b"show_faq")]
         ]
         
-        await send_long_message(event, MESSAGES['welcome'], buttons=buttons)
+        await send_long_message(event, MESSAGES['welcome'], buttons=buttons, parse_mode='markdown')
         
         analytics.track_event('mode_selection_shown', event.sender_id, {}, correlation_id)
     

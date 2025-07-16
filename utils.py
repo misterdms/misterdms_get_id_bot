@@ -27,11 +27,14 @@ class MessageUtils:
     """Утилиты для работы с сообщениями"""
     
     @staticmethod
-    async def send_long_message(event, text: str, max_length: int = 4000, parse_mode: str = 'markdown'):
-        """Отправка длинного сообщения с автоматической разбивкой"""
+    async def send_long_message(event, text: str, max_length: int = 4000, parse_mode: str = 'markdown', buttons=None):
+        """Отправка длинного сообщения с автоматической разбивкой и поддержкой кнопок"""
         try:
             if len(text) <= max_length:
-                await event.reply(text, parse_mode=parse_mode)
+                if buttons:
+                    await event.reply(text, parse_mode=parse_mode, buttons=buttons)
+                else:
+                    await event.reply(text, parse_mode=parse_mode)
                 return
             
             # Разбиваем текст на части
@@ -59,7 +62,11 @@ class MessageUtils:
             # Отправляем части
             for i, part in enumerate(parts):
                 if i == 0:
-                    await event.reply(part, parse_mode=parse_mode)
+                    # Первое сообщение с кнопками
+                    if buttons:
+                        await event.reply(part, parse_mode=parse_mode, buttons=buttons)
+                    else:
+                        await event.reply(part, parse_mode=parse_mode)
                 else:
                     header = f"📄 **Продолжение ({i+1}/{len(parts)}):**\n\n"
                     await event.respond(header + part, parse_mode=parse_mode)
@@ -110,7 +117,14 @@ class MessageUtils:
         except Exception as e:
             logger.error(f"❌ Ошибка smart_reply: {e}")
             # Fallback на обычный ответ
-            await event.reply(text, parse_mode=parse_mode)
+            try:
+                await event.reply(text, parse_mode=parse_mode)
+            except Exception as fallback_error:
+                logger.error(f"❌ Ошибка fallback reply: {fallback_error}")
+                try:
+                    await event.reply("❌ Ошибка отправки сообщения")
+                except:
+                    pass
 
 class FormatUtils:
     """Утилиты для форматирования данных"""
@@ -918,9 +932,9 @@ class TopicScannerFactory:
 # =============================================================================
 
 # Основные функции для совместимости с существующим кодом
-async def send_long_message(event, text: str, max_length: int = 4000, parse_mode: str = 'markdown'):
+async def send_long_message(event, text: str, max_length: int = 4000, parse_mode: str = 'markdown', buttons=None):
     """Совместимость: отправка длинного сообщения"""
-    return await MessageUtils.send_long_message(event, text, max_length, parse_mode)
+    return await MessageUtils.send_long_message(event, text, max_length, parse_mode, buttons)
 
 def format_topics_table(topics: List[Dict[str, Any]], include_links: bool = True) -> str:
     """Совместимость: форматирование таблицы топиков"""
