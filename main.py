@@ -144,6 +144,7 @@ class TopicsScannerBot:
             
             # Закрываем все соединения сканера
             await scanner.cleanup()
+            await db.cleanup()
             
             # Отключаем бота
             if self.bot.is_connected():
