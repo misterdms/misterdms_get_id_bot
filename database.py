@@ -2,7 +2,7 @@
 """
 Управление базой данных для гибридного Topics Scanner Bot
 Поддерживает SQLite и PostgreSQL с асинхронными операциями
-ИСПРАВЛЕНО: PostgreSQL запросы, импорты, валидация
+ИСПРАВЛЕНО: PostgreSQL запросы, импорты, валидация, fallback на SQLite
 """
 
 import aiosqlite
@@ -28,6 +28,11 @@ class DatabaseManager:
     """Менеджер базы данных с поддержкой SQLite и PostgreSQL + префиксы таблиц"""
     
     def __init__(self, database_url: str = DATABASE_URL, bot_prefix: str = BOT_PREFIX):
+        # Валидация DATABASE_URL
+        if not database_url or 'user:password@host' in database_url or 'presave_user:password@localhost' in database_url:
+            logger.warning("⚠️ Некорректный DATABASE_URL, переключение на SQLite")
+            database_url = 'sqlite:///bot_data.db'
+        
         self.database_url = database_url
         self.bot_prefix = bot_prefix.lower()
         self.db_type = 'sqlite' if database_url.startswith('sqlite') else 'postgresql'
@@ -59,6 +64,21 @@ class DatabaseManager:
             logger.info("✅ База данных инициализирована с префиксами")
         except Exception as e:
             logger.error(f"❌ Ошибка инициализации БД: {e}")
+            
+            # Автофоллбэк на SQLite при проблемах с PostgreSQL
+            if self.db_type == 'postgresql' and ('hostname' in str(e) or 'address' in str(e)):
+                logger.warning("🔄 Автофоллбэк на SQLite из-за проблем с PostgreSQL")
+                self.database_url = 'sqlite:///bot_data.db'
+                self.db_type = 'sqlite'
+                
+                try:
+                    await self.create_tables()
+                    await self.create_indexes()
+                    logger.info("✅ База данных инициализирована на SQLite (fallback)")
+                    return
+                except Exception as sqlite_error:
+                    logger.error(f"❌ Ошибка инициализации SQLite fallback: {sqlite_error}")
+            
             raise
     
     @asynccontextmanager
@@ -82,16 +102,24 @@ class DatabaseManager:
             
             conn = None
             try:
+                # Проверяем валидность URL
+                if not url.hostname or url.hostname in ['host', 'localhost', 'example.com']:
+                    raise ValueError(f"Invalid DATABASE_URL hostname: {url.hostname}")
+
                 conn = await asyncpg.connect(
                     host=url.hostname,
                     port=url.port or 5432,
                     user=url.username,
                     password=url.password,
-                    database=url.path[1:] if url.path else 'postgres'
+                    database=url.path[1:] if url.path else 'postgres',
+                    timeout=10
                 )
                 yield conn
             except Exception as e:
                 logger.error(f"❌ Ошибка подключения к PostgreSQL: {e}")
+                if 'No address associated with hostname' in str(e):
+                    logger.error("🔧 Проверьте DATABASE_URL в переменных окружения")
+                    logger.error("💡 На Render.com получите правильный URL из PostgreSQL addon misterdms-bots-db")
                 raise
             finally:
                 if conn:

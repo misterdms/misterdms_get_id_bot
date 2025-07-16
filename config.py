@@ -2,12 +2,39 @@
 """
 Конфигурация гибридного Topics Scanner Bot
 Содержит все настройки, константы и переменные окружения
-ИСПРАВЛЕНО: Добавлены все недостающие переменные для совместимости + команды связи
+ИСПРАВЛЕНО: Добавлены все недостающие переменные для совместимости + команды связи + проверка DATABASE_URL
 """
 
 import os
 import logging
 from typing import Dict, Any
+
+# Настройка логирования
+def setup_logging():
+    """Настройка системы логирования"""
+    LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO').upper()
+    LOG_FORMAT = os.getenv('LOG_FORMAT', 'structured')
+    
+    if LOG_FORMAT == 'structured':
+        formatter = logging.Formatter(
+            '%(asctime)s | %(name)s | %(levelname)s | %(message)s'
+        )
+    else:
+        formatter = logging.Formatter(
+            '%(asctime)s - %(levelname)s - %(message)s'
+        )
+    
+    handler = logging.StreamHandler()
+    handler.setFormatter(formatter)
+    
+    logger = logging.getLogger()
+    logger.setLevel(getattr(logging, LOG_LEVEL))
+    logger.addHandler(handler)
+    
+    return logger
+
+# Инициализируем логирование первым делом
+logger = setup_logging()
 
 # Основные bot credentials
 BOT_TOKEN = os.getenv('BOT_TOKEN')
@@ -20,9 +47,15 @@ if not all([BOT_TOKEN, API_ID, API_HASH]):
 
 # База данных + ПРЕФИКС ТАБЛИЦ (КРИТИЧНО!)
 # По умолчанию PostgreSQL для production, SQLite для локальной разработки
-DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://user:password@localhost:5432/hybrid_bots')
+DATABASE_URL = os.getenv('DATABASE_URL', 'sqlite:///bot_data.db')  # Безопасный fallback на SQLite
 DATABASE_POOL_SIZE = int(os.getenv('DATABASE_POOL_SIZE', '10'))
 BOT_PREFIX = os.getenv('BOT_PREFIX', 'get_id_bot')  # Префикс для таблиц
+
+# Проверка DATABASE_URL
+if DATABASE_URL and ('user:password@host' in DATABASE_URL or 'presave_user:password@localhost' in DATABASE_URL or DATABASE_URL == 'postgresql://user:password@host:5432/dbname'):
+    logger.warning("⚠️ ВНИМАНИЕ: DATABASE_URL содержит пример значения!")
+    logger.warning("💡 На Render.com получите реальный DATABASE_URL из PostgreSQL addon misterdms-bots-db")
+    logger.warning("🔄 Будет использоваться SQLite fallback")
 
 # Для локальной разработки можно переопределить в .env:
 # DATABASE_URL=sqlite:///bot_data.db
@@ -381,29 +414,8 @@ a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6
 API_ID_PATTERN = r'^\d{7,8}$'  # 7-8 цифр
 API_HASH_PATTERN = r'^[a-f0-9]{32}$'  # 32 символа hex
 
-# Настройка логирования
-def setup_logging():
-    """Настройка системы логирования"""
-    if LOG_FORMAT == 'structured':
-        formatter = logging.Formatter(
-            '%(asctime)s | %(name)s | %(levelname)s | %(message)s'
-        )
-    else:
-        formatter = logging.Formatter(
-            '%(asctime)s - %(levelname)s - %(message)s'
-        )
-    
-    handler = logging.StreamHandler()
-    handler.setFormatter(formatter)
-    
-    logger = logging.getLogger()
-    logger.setLevel(getattr(logging, LOG_LEVEL))
-    logger.addHandler(handler)
-    
-    return logger
-
 # Версия приложения - ОБНОВЛЕНО
-APP_VERSION = "4.1.0"
+APP_VERSION = "4.1.1"
 APP_NAME = "Hybrid Topics Scanner Bot"
 APP_DESCRIPTION = "Гибридный бот для сканирования топиков с поддержкой пользовательского режима и новыми фичами связи"
 
