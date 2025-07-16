@@ -2,7 +2,7 @@
 """
 Объединенные обработчики команд для гибридного Topics Scanner Bot
 Содержит логику для режима бота и пользовательского режима
-ИСПРАВЛЕНО: Убраны циклические импорты, добавлена полная реализация команд
+ИСПРАВЛЕНО: Убраны циклические импорты, исправлена обработка credentials
 """
 
 import logging
@@ -16,9 +16,11 @@ from telethon.tl.functions.messages import GetHistoryRequest
 from telethon.errors import ChatAdminRequiredError, ChannelPrivateError
 from telethon.tl.custom import Button
 
+# Импорты конфигурации
 from config import API_LIMITS, MESSAGES, BOT_MODES
+
+# Ленивые импорты для избежания циклических зависимостей
 from database import db_manager
-from utils import send_long_message, format_topics_table, TopicScannerFactory
 
 logger = logging.getLogger(__name__)
 
@@ -32,9 +34,9 @@ class CommandHandler:
         self.api_limiter = None
         self.activity_tracker = None
         
-        # Импорты для избежания циклических зависимостей
-        self.security_manager = None
-        self.analytics = None
+        # Ленивая инициализация для избежания циклических импортов
+        self._security_manager = None
+        self._analytics = None
         
     async def initialize(self, bot_client: TelegramClient, auth_manager, api_limiter, activity_tracker):
         """Инициализация обработчика"""
@@ -42,31 +44,41 @@ class CommandHandler:
         self.api_limiter = api_limiter
         self.activity_tracker = activity_tracker
         
-        # Ленивая инициализация security и analytics
-        try:
-            from security import security_manager
-            self.security_manager = security_manager
-        except ImportError:
-            logger.warning("⚠️ Security module недоступен")
-        
-        try:
-            from analytics import analytics
-            self.analytics = analytics
-        except ImportError:
-            logger.warning("⚠️ Analytics module недоступен")
-        
         await self.bot_mode.initialize(bot_client, api_limiter)
         await self.user_mode.initialize(auth_manager, api_limiter)
         
         logger.info("✅ CommandHandler инициализирован")
     
+    def get_security_manager(self):
+        """Ленивое получение security manager"""
+        if self._security_manager is None:
+            try:
+                from security import security_manager
+                self._security_manager = security_manager
+            except ImportError:
+                logger.warning("⚠️ Security module недоступен")
+                self._security_manager = None
+        return self._security_manager
+    
+    def get_analytics(self):
+        """Ленивое получение analytics"""
+        if self._analytics is None:
+            try:
+                from analytics import analytics
+                self._analytics = analytics
+            except ImportError:
+                logger.warning("⚠️ Analytics module недоступен")
+                self._analytics = None
+        return self._analytics
+    
     async def route_command(self, command: str, event, user_mode: str = 'bot') -> bool:
         """Маршрутизация команды в зависимости от режима"""
         try:
             # Аналитика
+            analytics = self.get_analytics()
             correlation_id = ""
-            if self.analytics:
-                correlation_id = self.analytics.track_command(event.sender_id, command)
+            if analytics:
+                correlation_id = analytics.track_command(event.sender_id, command)
             
             if user_mode == 'user':
                 return await self.user_mode.handle_command(command, event)
@@ -75,19 +87,20 @@ class CommandHandler:
                 
         except Exception as e:
             logger.error(f"❌ Ошибка маршрутизации команды {command}: {e}")
-            if self.analytics:
-                self.analytics.track_error(event.sender_id, 'command_routing_error', str(e))
-            await event.reply(MESSAGES['error_general'].format(error_message=str(e)))
+            analytics = self.get_analytics()
+            if analytics:
+                analytics.track_error(event.sender_id, 'command_routing_error', str(e))
+            await self._safe_reply(event, f"❌ Произошла ошибка: {str(e)}")
             return False
     
     async def handle_start(self, event, user_mode: str = 'bot') -> bool:
         """Обработка команды /start с inline кнопками"""
         try:
+            analytics = self.get_analytics()
             correlation_id = ""
-            if self.analytics:
-                correlation_id = self.analytics.track_command(event.sender_id, '/start')
+            if analytics:
+                correlation_id = analytics.track_command(event.sender_id, '/start')
             
-            # ИСПРАВЛЕНО: Добавлены inline кнопки для выбора режима
             if event.is_private:
                 # В ЛС показываем выбор режима с кнопками
                 buttons = [
@@ -97,10 +110,10 @@ class CommandHandler:
                     [Button.inline("❓ Частые вопросы", b"show_faq")]
                 ]
                 
-                await send_long_message(event, MESSAGES['welcome'], buttons=buttons, parse_mode='markdown')
+                await self._safe_reply(event, MESSAGES['welcome'], buttons=buttons, parse_mode='markdown')
                 
-                if self.analytics:
-                    self.analytics.track_event('start_with_buttons_shown', event.sender_id, {}, correlation_id)
+                if analytics:
+                    analytics.track_event('start_with_buttons_shown', event.sender_id, {}, correlation_id)
                 return True
             else:
                 # В группах - работа в выбранном режиме
@@ -111,10 +124,156 @@ class CommandHandler:
             
         except Exception as e:
             logger.error(f"❌ Ошибка в handle_start: {e}")
-            if self.analytics:
-                self.analytics.track_error(event.sender_id, 'start_error', str(e))
-            await event.reply(MESSAGES['error_general'].format(error_message=str(e)))
+            analytics = self.get_analytics()
+            if analytics:
+                analytics.track_error(event.sender_id, 'start_error', str(e))
+            await self._safe_reply(event, f"❌ Произошла ошибка: {str(e)}")
             return False
+    
+    async def process_credentials(self, event) -> bool:
+        """ИСПРАВЛЕНО: Обработка пользовательских credentials"""
+        try:
+            if not event.is_private or not event.text:
+                return False
+            
+            user_id = event.sender_id
+            
+            # Проверяем, ожидает ли пользователь ввод credentials
+            user_data = await db_manager.get_user(user_id)
+            if not user_data:
+                return False
+                
+            # Если пользователь уже в user режиме с credentials - не обрабатываем
+            if (user_data.get('mode') == 'user' and 
+                user_data.get('api_id_encrypted') and 
+                user_data.get('api_hash_encrypted')):
+                return False
+            
+            # Если пользователь в bot режиме без credentials - потенциально это credentials
+            if user_data.get('mode') == 'bot' and not user_data.get('api_id_encrypted'):
+                # Проверяем формат
+                lines = event.text.strip().split('\n')
+                if len(lines) == 2:
+                    api_id = lines[0].strip()
+                    api_hash = lines[1].strip()
+                    
+                    # Базовая проверка формата
+                    if (api_id.isdigit() and len(api_id) >= 7 and 
+                        len(api_hash) == 32 and all(c in '0123456789abcdef' for c in api_hash.lower())):
+                        
+                        logger.info(f"🔐 Обработка credentials для пользователя {user_id}")
+                        
+                        # Аналитика
+                        analytics = self.get_analytics()
+                        correlation_id = ""
+                        if analytics:
+                            correlation_id = analytics.track_command(user_id, 'credentials_input')
+                        
+                        # Сохраняем credentials через auth_manager
+                        if self.auth_manager:
+                            success, message = await self.auth_manager.save_user_credentials(
+                                user_id, api_id, api_hash
+                            )
+                            
+                            if success:
+                                await self._safe_reply(event, MESSAGES['credentials_saved'])
+                                
+                                if analytics:
+                                    analytics.track_event('credentials_saved_successfully', user_id, {
+                                        'method': 'manual_input'
+                                    }, correlation_id)
+                                return True
+                            else:
+                                await self._safe_reply(event, f"❌ {message}\n\nПопробуйте еще раз или используйте /renew_my_api_hash")
+                                if analytics:
+                                    analytics.track_error(user_id, 'credentials_save_failed', message)
+                                return False
+                        else:
+                            await self._safe_reply(event, "❌ Сервис аутентификации недоступен")
+                            return False
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка обработки credentials: {e}")
+            analytics = self.get_analytics()
+            if analytics:
+                analytics.track_error(event.sender_id, 'credentials_processing_error', str(e))
+            await self._safe_reply(event, f"❌ Ошибка обработки данных: {str(e)}")
+            return False
+    
+    async def handle_contact_commands(self, event, command: str) -> bool:
+        """Обработка команд связи v4.1"""
+        try:
+            user_id = event.sender_id
+            analytics = self.get_analytics()
+            correlation_id = ""
+            
+            if command == 'yo_bro':
+                if analytics:
+                    correlation_id = analytics.track_command(user_id, '/yo_bro')
+                
+                await self._safe_reply(event, MESSAGES['yo_bro'], parse_mode='markdown')
+                await self._notify_admin(f"👋 Пользователь {user_id} использовал /yo_bro")
+                
+                if analytics:
+                    analytics.track_event('creator_contact_used', user_id, {}, correlation_id)
+                return True
+                
+            elif command == 'buy_bots':
+                if analytics:
+                    correlation_id = analytics.track_command(user_id, '/buy_bots')
+                
+                await self._safe_reply(event, MESSAGES['buy_bots'], parse_mode='markdown')
+                await self._notify_admin(f"💼 Пользователь {user_id} интересуется заказом ботов (/buy_bots)")
+                
+                if analytics:
+                    analytics.track_event('business_contact_used', user_id, {}, correlation_id)
+                return True
+                
+            elif command == 'donate':
+                if analytics:
+                    correlation_id = analytics.track_command(user_id, '/donate')
+                
+                await self._safe_reply(event, MESSAGES['donate'], parse_mode='markdown')
+                await self._notify_admin(f"💝 Пользователь {user_id} открыл информацию о донатах")
+                
+                if analytics:
+                    analytics.track_event('donate_info_viewed', user_id, {}, correlation_id)
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка в команде связи {command}: {e}")
+            await self._safe_reply(event, f"❌ Ошибка выполнения команды: {str(e)}")
+            return False
+    
+    async def _notify_admin(self, message: str):
+        """Уведомление администратора"""
+        try:
+            from config import ADMIN_USER_ID
+            # Здесь нужно получить bot_client, но это может создать циклическую зависимость
+            # Пока оставляем логирование, в main.py будет полная реализация
+            logger.info(f"📢 Уведомление админа: {message}")
+        except Exception as e:
+            logger.debug(f"Не удалось отправить уведомление админу: {e}")
+    
+    async def _safe_reply(self, event, text: str, **kwargs):
+        """Безопасный ответ на сообщение"""
+        try:
+            # Используем простой импорт для избежания циклических зависимостей
+            from utils import send_long_message
+            await send_long_message(event, text, **kwargs)
+        except ImportError:
+            # Fallback на стандартный reply
+            await event.reply(text, **kwargs)
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки сообщения: {e}")
+            try:
+                await event.reply("❌ Ошибка отправки сообщения")
+            except:
+                pass
 
 class BaseModeHandler:
     """Базовый класс для обработчиков режимов"""
@@ -158,7 +317,7 @@ class BaseModeHandler:
     async def _auto_adjust_limits(self, event, participants_count: int, request_type: str):
         """Автоматическое переключение лимитов"""
         try:
-            if not self.api_limiter.auto_mode_enabled or participants_count <= 0:
+            if not self.api_limiter or not self.api_limiter.auto_mode_enabled or participants_count <= 0:
                 return
             
             complexity = 'heavy' if request_type in ['get_all', 'full_scan'] else 'normal'
@@ -190,18 +349,11 @@ class BotModeHandler(BaseModeHandler):
     async def handle_command(self, command: str, event) -> bool:
         """Обработка команды в режиме бота"""
         try:
-            # Запись запроса в security (если доступно)
+            # Безопасная запись запроса
             try:
-                from security import security_manager
-                security_manager.record_request(event.sender_id, command, 'group')
-            except:
-                pass
-            
-            # Аналитика
-            correlation_id = ""
-            try:
-                from analytics import analytics
-                correlation_id = analytics.track_command(event.sender_id, command, 'bot_mode')
+                security_manager = self._get_security_manager()
+                if security_manager:
+                    security_manager.record_request(event.sender_id, command, 'group')
             except:
                 pass
             
@@ -215,22 +367,20 @@ class BotModeHandler(BaseModeHandler):
                 return await self.handle_get_ids(event)
             else:
                 logger.warning(f"⚠️ Неизвестная команда: {command}")
-                try:
-                    from analytics import analytics
-                    analytics.track_error(event.sender_id, 'unknown_command', command)
-                except:
-                    pass
                 return False
                 
         except Exception as e:
             logger.error(f"❌ Ошибка обработки команды {command}: {e}")
-            try:
-                from analytics import analytics
-                analytics.track_error(event.sender_id, 'bot_mode_command_error', str(e))
-            except:
-                pass
-            await event.reply(MESSAGES['error_general'].format(error_message=str(e)))
+            await event.reply(f"❌ Ошибка: {str(e)}")
             return False
+    
+    def _get_security_manager(self):
+        """Получить security manager"""
+        try:
+            from security import security_manager
+            return security_manager
+        except ImportError:
+            return None
     
     async def handle_start(self, event) -> bool:
         """Обработчик /start в режиме бота"""
@@ -241,11 +391,12 @@ class BotModeHandler(BaseModeHandler):
             logger.info(f"🤖 /start (bot mode) от пользователя {user_id}")
             
             # Проверка лимитов
-            if not self.api_limiter.can_make_request():
+            if self.api_limiter and not self.api_limiter.can_make_request():
                 await event.reply("⚠️ **Превышен лимит запросов**\n\nПопробуйте позже")
                 return False
             
-            self.api_limiter.record_request()
+            if self.api_limiter:
+                self.api_limiter.record_request()
             
             # Валидация чата
             is_valid, chat = await self._validate_group_chat(event)
@@ -257,33 +408,24 @@ class BotModeHandler(BaseModeHandler):
             await self._auto_adjust_limits(event, participants_count, 'full_scan')
             
             # Сканирование топиков
+            from utils import TopicScannerFactory
             scanner = TopicScannerFactory.create_scanner(self.client, 'bot')
             topics_data = await scanner.scan_topics(chat)
             
             # Формирование ответа
             response = self._build_start_response(chat, participants_count, topics_data, start_time)
             
+            from utils import send_long_message
             await send_long_message(event, response)
             
             duration = (datetime.now() - start_time).total_seconds()
-            try:
-                from analytics import analytics
-                analytics.track_performance('/start_bot_mode', duration * 1000, True)
-            except:
-                pass
-            
             logger.info(f"⚡ /start (bot mode) выполнен за {duration:.2f}с")
             
             return True
             
         except Exception as e:
             logger.error(f"❌ Ошибка в handle_start (bot mode): {e}")
-            try:
-                from analytics import analytics
-                analytics.track_error(event.sender_id, 'start_bot_mode_error', str(e))
-            except:
-                pass
-            await event.reply(MESSAGES['error_general'].format(error_message=str(e)))
+            await event.reply(f"❌ Ошибка: {str(e)}")
             return False
     
     async def handle_scan(self, event) -> bool:
@@ -291,11 +433,12 @@ class BotModeHandler(BaseModeHandler):
         try:
             logger.info(f"🤖 /scan (bot mode) от пользователя {event.sender_id}")
             
-            if not self.api_limiter.can_make_request():
+            if self.api_limiter and not self.api_limiter.can_make_request():
                 await event.reply("⚠️ **Превышен лимит запросов**")
                 return False
             
-            self.api_limiter.record_request()
+            if self.api_limiter:
+                self.api_limiter.record_request()
             
             is_valid, chat = await self._validate_group_chat(event)
             if not is_valid:
@@ -304,26 +447,20 @@ class BotModeHandler(BaseModeHandler):
             participants_count = await self._get_participants_count(chat)
             await self._auto_adjust_limits(event, participants_count, 'scan')
             
+            from utils import TopicScannerFactory
             scanner = TopicScannerFactory.create_scanner(self.client, 'bot')
             topics_data = await scanner.scan_topics(chat)
             
             response = self._build_scan_response(chat, participants_count, topics_data)
-            await send_long_message(event, response)
             
-            try:
-                from analytics import analytics
-                analytics.track_event('scan_completed', event.sender_id, {
-                    'mode': 'bot',
-                    'topics_found': len([t for t in topics_data if t['id'] > 0])
-                })
-            except:
-                pass
+            from utils import send_long_message
+            await send_long_message(event, response)
             
             return True
             
         except Exception as e:
             logger.error(f"❌ Ошибка в handle_scan (bot mode): {e}")
-            await event.reply(MESSAGES['error_general'].format(error_message=str(e)))
+            await event.reply(f"❌ Ошибка: {str(e)}")
             return False
     
     async def handle_get_all(self, event) -> bool:
@@ -331,11 +468,12 @@ class BotModeHandler(BaseModeHandler):
         try:
             logger.info(f"🤖 /get_all (bot mode) от пользователя {event.sender_id}")
             
-            if not self.api_limiter.can_make_request():
+            if self.api_limiter and not self.api_limiter.can_make_request():
                 await event.reply("⚠️ **Превышен лимит запросов**")
                 return False
             
-            self.api_limiter.record_request()
+            if self.api_limiter:
+                self.api_limiter.record_request()
             
             is_valid, chat = await self._validate_group_chat(event)
             if not is_valid:
@@ -344,6 +482,7 @@ class BotModeHandler(BaseModeHandler):
             processing_msg = await event.reply("🔄 **Получение всех данных (режим бота)...**")
             
             # Получение данных
+            from utils import TopicScannerFactory
             scanner = TopicScannerFactory.create_scanner(self.client, 'bot')
             topics_data = await scanner.scan_topics(chat)
             active_users = await db_manager.get_active_users(event.chat_id)
@@ -352,23 +491,14 @@ class BotModeHandler(BaseModeHandler):
             response = self._build_get_all_response(chat, topics_data, active_users, activity_stats)
             
             await processing_msg.delete()
+            from utils import send_long_message
             await send_long_message(event, response)
-            
-            try:
-                from analytics import analytics
-                analytics.track_event('get_all_completed', event.sender_id, {
-                    'mode': 'bot',
-                    'topics_found': len([t for t in topics_data if t['id'] > 0]),
-                    'active_users': len(active_users)
-                })
-            except:
-                pass
             
             return True
             
         except Exception as e:
             logger.error(f"❌ Ошибка в handle_get_all (bot mode): {e}")
-            await event.reply(MESSAGES['error_general'].format(error_message=str(e)))
+            await event.reply(f"❌ Ошибка: {str(e)}")
             return False
     
     async def handle_get_users(self, event) -> bool:
@@ -384,22 +514,15 @@ class BotModeHandler(BaseModeHandler):
             activity_stats = await db_manager.get_activity_stats(event.chat_id)
             
             response = self._build_users_response(active_users, activity_stats)
-            await send_long_message(event, response)
             
-            try:
-                from analytics import analytics
-                analytics.track_event('get_users_completed', event.sender_id, {
-                    'mode': 'bot',
-                    'active_users': len(active_users)
-                })
-            except:
-                pass
+            from utils import send_long_message
+            await send_long_message(event, response)
             
             return True
             
         except Exception as e:
             logger.error(f"❌ Ошибка в handle_get_users (bot mode): {e}")
-            await event.reply(MESSAGES['error_general'].format(error_message=str(e)))
+            await event.reply(f"❌ Ошибка: {str(e)}")
             return False
     
     async def handle_get_ids(self, event) -> bool:
@@ -407,36 +530,31 @@ class BotModeHandler(BaseModeHandler):
         try:
             logger.info(f"🤖 /get_ids (bot mode) от пользователя {event.sender_id}")
             
-            if not self.api_limiter.can_make_request():
+            if self.api_limiter and not self.api_limiter.can_make_request():
                 await event.reply("⚠️ **Превышен лимит запросов**")
                 return False
             
-            self.api_limiter.record_request()
+            if self.api_limiter:
+                self.api_limiter.record_request()
             
             is_valid, chat = await self._validate_group_chat(event)
             if not is_valid:
                 return False
             
+            from utils import TopicScannerFactory
             scanner = TopicScannerFactory.create_scanner(self.client, 'bot')
             topics_data = await scanner.scan_topics(chat)
             
             response = self._build_ids_response(chat, topics_data)
-            await send_long_message(event, response)
             
-            try:
-                from analytics import analytics
-                analytics.track_event('get_ids_completed', event.sender_id, {
-                    'mode': 'bot',
-                    'topics_found': len([t for t in topics_data if t['id'] > 0])
-                })
-            except:
-                pass
+            from utils import send_long_message
+            await send_long_message(event, response)
             
             return True
             
         except Exception as e:
             logger.error(f"❌ Ошибка в handle_get_ids (bot mode): {e}")
-            await event.reply(MESSAGES['error_general'].format(error_message=str(e)))
+            await event.reply(f"❌ Ошибка: {str(e)}")
             return False
     
     def _build_start_response(self, chat, participants_count, topics_data, start_time) -> str:
@@ -450,14 +568,15 @@ class BotModeHandler(BaseModeHandler):
         response += f"🕒 **Время сканирования:** {start_time.strftime('%d.%m.%Y %H:%M:%S')}\n\n"
         
         if topics_data:
-            regular_topics = [t for t in topics_data if t['id'] > 0]
-            system_topics = [t for t in topics_data if t['id'] <= 0]
+            regular_topics = [t for t in topics_data if t.get('id', 0) > 0]
+            system_topics = [t for t in topics_data if t.get('id', 0) <= 0]
             
             response += f"📊 **НАЙДЕНО ТОПИКОВ: {len(regular_topics)}**\n"
             
             if system_topics:
                 response += "⚠️ **Примечание:** Из-за ограничений Bot API некоторые топики могут быть недоступны.\n\n"
             
+            from utils import format_topics_table
             response += format_topics_table(regular_topics)
             
             if system_topics:
@@ -486,8 +605,10 @@ class BotModeHandler(BaseModeHandler):
         response += f"🕒 **Время:** {datetime.now().strftime('%H:%M:%S')}\n\n"
         
         if topics_data:
-            regular_topics = [t for t in topics_data if t['id'] > 0]
+            regular_topics = [t for t in topics_data if t.get('id', 0) > 0]
             response += f"📊 **НАЙДЕНО: {len(regular_topics)} топиков**\n\n"
+            
+            from utils import format_topics_table
             response += format_topics_table(regular_topics)
             
             response += "\n⚠️ **Режим бота:** Могут быть показаны не все топики\n"
@@ -505,7 +626,7 @@ class BotModeHandler(BaseModeHandler):
         response += f"🕒 **Время:** {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}\n\n"
         
         # Секция топиков
-        regular_topics = [t for t in topics_data if t['id'] > 0]
+        regular_topics = [t for t in topics_data if t.get('id', 0) > 0]
         if regular_topics:
             response += f"📋 **ТОПИКИ ({len(regular_topics)}):**\n\n"
             for topic in regular_topics:
@@ -578,7 +699,7 @@ class BotModeHandler(BaseModeHandler):
         response += f"🕒 **Время:** {datetime.now().strftime('%H:%M:%S')}\n\n"
         
         if topics_data:
-            regular_topics = [t for t in topics_data if t['id'] > 0]
+            regular_topics = [t for t in topics_data if t.get('id', 0) > 0]
             response += f"📊 **НАЙДЕНО: {len(regular_topics)} топиков**\n\n"
             
             response += "| ID | Название | Ссылка |\n"
@@ -614,23 +735,14 @@ class UserModeHandler(BaseModeHandler):
         try:
             user_id = event.sender_id
             
-            # Аналитика
-            correlation_id = ""
-            try:
-                from analytics import analytics
-                correlation_id = analytics.track_command(user_id, command, 'user_mode')
-            except:
-                pass
-            
             # Получаем пользовательскую сессию
+            if not self.auth_manager:
+                await event.reply("❌ **Сервис аутентификации недоступен**")
+                return False
+                
             user_client = await self.auth_manager.get_user_session(user_id)
             if not user_client:
                 await event.reply("❌ **Не удалось получить пользовательскую сессию**\n\nПопробуйте `/renew_my_api_hash`")
-                try:
-                    from analytics import analytics
-                    analytics.track_error(user_id, 'no_user_session', command)
-                except:
-                    pass
                 if task_id:
                     await db_manager.complete_task(task_id, error="Нет пользовательской сессии")
                 return False
@@ -649,11 +761,6 @@ class UserModeHandler(BaseModeHandler):
                 success = await self.handle_get_ids(event)
             else:
                 logger.warning(f"⚠️ Неизвестная команда в user режиме: {command}")
-                try:
-                    from analytics import analytics
-                    analytics.track_error(user_id, 'unknown_command_user_mode', command)
-                except:
-                    pass
                 if task_id:
                     await db_manager.complete_task(task_id, error=f"Неизвестная команда: {command}")
                 return False
@@ -661,25 +768,11 @@ class UserModeHandler(BaseModeHandler):
             if success and task_id:
                 await db_manager.complete_task(task_id, result="Команда выполнена успешно")
             
-            try:
-                from analytics import analytics
-                analytics.track_event('user_mode_command_completed', user_id, {
-                    'command': command,
-                    'success': success
-                }, correlation_id)
-            except:
-                pass
-            
             return success
             
         except Exception as e:
             logger.error(f"❌ Ошибка обработки команды {command} в user режиме: {e}")
-            try:
-                from analytics import analytics
-                analytics.track_error(event.sender_id, 'user_mode_command_error', str(e))
-            except:
-                pass
-            await event.reply(MESSAGES['error_general'].format(error_message=str(e)))
+            await event.reply(f"❌ Ошибка: {str(e)}")
             if task_id:
                 await db_manager.complete_task(task_id, error=str(e))
             return False
@@ -693,6 +786,10 @@ class UserModeHandler(BaseModeHandler):
             logger.info(f"👤 /start (user mode) от пользователя {user_id}")
             
             # Получаем пользовательскую сессию
+            if not self.auth_manager:
+                await event.reply("❌ **Сервис аутентификации недоступен**")
+                return False
+                
             user_client = await self.auth_manager.get_user_session(user_id)
             if not user_client:
                 await event.reply("❌ **Пользовательская сессия недоступна**\n\nИспользуйте `/renew_my_api_hash` для настройки")
@@ -715,6 +812,7 @@ class UserModeHandler(BaseModeHandler):
             await self._auto_adjust_limits(event, participants_count, 'full_scan')
             
             # Полное сканирование топиков
+            from utils import TopicScannerFactory
             scanner = TopicScannerFactory.create_scanner(user_client, 'user')
             topics_data = await scanner.scan_topics(chat)
             
@@ -722,27 +820,18 @@ class UserModeHandler(BaseModeHandler):
             activity_stats = await db_manager.get_activity_stats(event.chat_id)
             
             response = self._build_start_response(chat, participants_count, topics_data, activity_stats, start_time)
+            
+            from utils import send_long_message
             await send_long_message(event, response)
             
             duration = (datetime.now() - start_time).total_seconds()
-            try:
-                from analytics import analytics
-                analytics.track_performance('/start_user_mode', duration * 1000, True)
-            except:
-                pass
-            
             logger.info(f"⚡ /start (user mode) выполнен за {duration:.2f}с")
             
             return True
             
         except Exception as e:
             logger.error(f"❌ Ошибка в handle_start (user mode): {e}")
-            try:
-                from analytics import analytics
-                analytics.track_error(event.sender_id, 'start_user_mode_error', str(e))
-            except:
-                pass
-            await event.reply(MESSAGES['error_general'].format(error_message=str(e)))
+            await event.reply(f"❌ Ошибка: {str(e)}")
             return False
     
     async def handle_scan(self, event) -> bool:
@@ -757,26 +846,20 @@ class UserModeHandler(BaseModeHandler):
             participants_count = await self._get_participants_count(chat)
             await self._auto_adjust_limits(event, participants_count, 'scan')
             
+            from utils import TopicScannerFactory
             scanner = TopicScannerFactory.create_scanner(self.client, 'user')
             topics_data = await scanner.scan_topics(chat)
             
             response = self._build_scan_response(chat, participants_count, topics_data)
-            await send_long_message(event, response)
             
-            try:
-                from analytics import analytics
-                analytics.track_event('scan_completed', event.sender_id, {
-                    'mode': 'user',
-                    'topics_found': len([t for t in topics_data if t['id'] > 0])
-                })
-            except:
-                pass
+            from utils import send_long_message
+            await send_long_message(event, response)
             
             return True
             
         except Exception as e:
             logger.error(f"❌ Ошибка в handle_scan (user mode): {e}")
-            await event.reply(MESSAGES['error_general'].format(error_message=str(e)))
+            await event.reply(f"❌ Ошибка: {str(e)}")
             return False
     
     async def handle_get_all(self, event) -> bool:
@@ -791,6 +874,7 @@ class UserModeHandler(BaseModeHandler):
             processing_msg = await event.reply("🔄 **Получение всех данных (пользовательский режим)...**")
             
             # Получение данных
+            from utils import TopicScannerFactory
             scanner = TopicScannerFactory.create_scanner(self.client, 'user')
             topics_data = await scanner.scan_topics(chat)
             active_users = await db_manager.get_active_users(event.chat_id)
@@ -799,23 +883,15 @@ class UserModeHandler(BaseModeHandler):
             response = self._build_get_all_response(chat, topics_data, active_users, activity_stats)
             
             await processing_msg.delete()
-            await send_long_message(event, response)
             
-            try:
-                from analytics import analytics
-                analytics.track_event('get_all_completed', event.sender_id, {
-                    'mode': 'user',
-                    'topics_found': len([t for t in topics_data if t['id'] > 0]),
-                    'active_users': len(active_users)
-                })
-            except:
-                pass
+            from utils import send_long_message
+            await send_long_message(event, response)
             
             return True
             
         except Exception as e:
             logger.error(f"❌ Ошибка в handle_get_all (user mode): {e}")
-            await event.reply(MESSAGES['error_general'].format(error_message=str(e)))
+            await event.reply(f"❌ Ошибка: {str(e)}")
             return False
     
     async def handle_get_users(self, event) -> bool:
@@ -831,22 +907,15 @@ class UserModeHandler(BaseModeHandler):
             activity_stats = await db_manager.get_activity_stats(event.chat_id)
             
             response = self._build_users_response(active_users, activity_stats)
-            await send_long_message(event, response)
             
-            try:
-                from analytics import analytics
-                analytics.track_event('get_users_completed', event.sender_id, {
-                    'mode': 'user',
-                    'active_users': len(active_users)
-                })
-            except:
-                pass
+            from utils import send_long_message
+            await send_long_message(event, response)
             
             return True
             
         except Exception as e:
             logger.error(f"❌ Ошибка в handle_get_users (user mode): {e}")
-            await event.reply(MESSAGES['error_general'].format(error_message=str(e)))
+            await event.reply(f"❌ Ошибка: {str(e)}")
             return False
     
     async def handle_get_ids(self, event) -> bool:
@@ -858,26 +927,20 @@ class UserModeHandler(BaseModeHandler):
             if not is_valid:
                 return False
             
+            from utils import TopicScannerFactory
             scanner = TopicScannerFactory.create_scanner(self.client, 'user')
             topics_data = await scanner.scan_topics(chat)
             
             response = self._build_ids_response(chat, topics_data)
-            await send_long_message(event, response)
             
-            try:
-                from analytics import analytics
-                analytics.track_event('get_ids_completed', event.sender_id, {
-                    'mode': 'user',
-                    'topics_found': len([t for t in topics_data if t['id'] > 0])
-                })
-            except:
-                pass
+            from utils import send_long_message
+            await send_long_message(event, response)
             
             return True
             
         except Exception as e:
             logger.error(f"❌ Ошибка в handle_get_ids (user mode): {e}")
-            await event.reply(MESSAGES['error_general'].format(error_message=str(e)))
+            await event.reply(f"❌ Ошибка: {str(e)}")
             return False
     
     def _build_start_response(self, chat, participants_count, topics_data, activity_stats, start_time) -> str:
@@ -892,7 +955,7 @@ class UserModeHandler(BaseModeHandler):
         
         # Полное сканирование топиков
         if topics_data:
-            topics_data.sort(key=lambda x: x['id'])
+            topics_data.sort(key=lambda x: x.get('id', 0))
             
             response += f"📊 **НАЙДЕНО ТОПИКОВ: {len(topics_data)}**\n"
             response += "✅ **Полная информация доступна в user режиме**\n\n"
