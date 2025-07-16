@@ -2,7 +2,7 @@
 """
 🤖 Гибридный Topics Scanner Bot v4.1
 Точка входа приложения с поддержкой режимов бота и пользователя
-ИСПРАВЛЕНО: Интеграция сервисов, импорты, inline кнопки
+ИСПРАВЛЕНО: Передача original_event в очередь, меню после действий, обработка результатов
 """
 
 import asyncio
@@ -191,12 +191,21 @@ class HybridTopicsBot:
                 
                 if data == 'mode_bot':
                     await self._set_bot_mode(event, user_id)
+                    # ИСПРАВЛЕНО: Показываем меню после установки режима
+                    await self._show_mode_selection_after_action(event)
                 elif data == 'mode_user':
                     await self._set_user_mode(event, user_id)
+                    # Меню не показываем, так как ожидаем ввод credentials
                 elif data == 'show_commands':
                     await self._show_commands_help(event)
+                    await self._show_mode_selection_after_action(event)
                 elif data == 'show_faq':
                     await self._show_faq_inline(event)
+                    await self._show_mode_selection_after_action(event)
+                elif data == 'main_menu':
+                    await self._show_mode_selection(event)
+                elif data == 'back':
+                    await self._show_mode_selection(event)
                 
                 # Успешная аналитика
                 analytics.track_event('callback_completed', user_id, 
@@ -374,7 +383,7 @@ class HybridTopicsBot:
                 logger.debug(f"Ошибка обработки credentials: {e}")
     
     async def _route_command(self, event, command: str):
-        """Маршрутизация команды в зависимости от режима пользователя"""
+        """Маршрутизация команды в зависимости от режима пользователя - ИСПРАВЛЕНО"""
         try:
             user_id = event.sender_id
             user_data = await db_manager.get_user(user_id)
@@ -384,7 +393,7 @@ class HybridTopicsBot:
                                                    'private' if event.is_private else 'group')
             
             if user_data and user_data['mode'] == 'user':
-                # Добавляем в очередь для пользовательского режима
+                # ИСПРАВЛЕНО: Добавляем в очередь для пользовательского режима с original_event
                 task_id = await self.service_manager.queue.add_task(
                     user_id=user_id,
                     command=command,
@@ -396,7 +405,8 @@ class HybridTopicsBot:
                         'text': event.text,
                         'correlation_id': correlation_id
                     }},
-                    priority=2
+                    priority=2,
+                    original_event=event  # ИСПРАВЛЕНО: Передаем original_event!
                 )
                 
                 # Уведомляем о добавлении в очередь
@@ -453,12 +463,30 @@ class HybridTopicsBot:
         welcome_msg = MESSAGES.get('welcome', 
             "🤖 **ГИБРИДНЫЙ TOPICS SCANNER BOT v4.1**\n\nВыберите режим работы:")
         
-        await send_long_message(event, welcome_msg, buttons=buttons, parse_mode='markdown')
+        # ИСПРАВЛЕНО: Используем edit если возможно, иначе новое сообщение
+        try:
+            if hasattr(event, 'edit'):
+                await event.edit(welcome_msg, buttons=buttons, parse_mode='markdown')
+            else:
+                await send_long_message(event, welcome_msg, buttons=buttons, parse_mode='markdown')
+        except:
+            await send_long_message(event, welcome_msg, buttons=buttons, parse_mode='markdown')
         
         analytics.track_event('mode_selection_shown', event.sender_id, {}, correlation_id)
     
+    async def _show_mode_selection_after_action(self, event):
+        """Показать меню после действия - НОВОЕ"""
+        buttons = [
+            [Button.inline("🏠 Главное меню", b"main_menu")],
+            [Button.inline("🔙 Назад", b"back")]
+        ]
+        
+        menu_msg = "🤖 **ГЛАВНОЕ МЕНЮ**\n\nВыберите действие:"
+        
+        await send_long_message(event, menu_msg, buttons=buttons, parse_mode='markdown')
+    
     async def _set_bot_mode(self, event, user_id: int):
-        """Установить режим бота"""
+        """Установить режим бота - ИСПРАВЛЕНО"""
         correlation_id = analytics.track_command(user_id, 'bot_mode_selected')
         
         await db_manager.create_or_update_user(user_id, mode='bot')
@@ -473,7 +501,7 @@ class HybridTopicsBot:
         }, correlation_id)
     
     async def _set_user_mode(self, event, user_id: int):
-        """Установить режим пользователя"""
+        """Установить режим пользователя - ИСПРАВЛЕНО"""
         correlation_id = analytics.track_command(user_id, 'user_mode_selected')
         
         user_mode_msg = MESSAGES.get('user_mode_instructions', 
@@ -485,7 +513,7 @@ class HybridTopicsBot:
         analytics.track_event('user_mode_instructions_shown', user_id, {}, correlation_id)
     
     async def _process_credentials(self, event, correlation_id: str = ""):
-        """Обработка пользовательских credentials"""
+        """Обработка пользовательских credentials - ИСПРАВЛЕНО"""
         try:
             lines = event.text.strip().split('\n')
             
@@ -506,6 +534,10 @@ class HybridTopicsBot:
                 credentials_saved_msg = MESSAGES.get('credentials_saved', 
                     "✅ **ПОЛЬЗОВАТЕЛЬСКИЙ РЕЖИМ АКТИВИРОВАН**\n\n🔐 Ваши credentials сохранены и зашифрованы")
                 await send_long_message(event, credentials_saved_msg)
+                
+                # ИСПРАВЛЕНО: Показываем меню после успешного сохранения
+                await self._show_mode_selection_after_action(event)
+                
                 analytics.track_event('credentials_saved_successfully', event.sender_id, {
                     'method': 'manual_input'
                 }, correlation_id)

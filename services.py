@@ -2,7 +2,7 @@
 """
 Объединенные сервисы для гибридного Topics Scanner Bot
 Включает: ActivityTracker, APILimiter, QueueManager
-ИСПРАВЛЕНО: Завершены незавершенные методы, исправлены импорты, добавлена интеграция с handlers
+ИСПРАВЛЕНО: Реальное выполнение команд через handlers, правильная отправка результатов
 """
 
 import asyncio
@@ -36,6 +36,7 @@ class QueueTask:
     created_at: datetime
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+    original_event: Optional[Any] = None  # ИСПРАВЛЕНО: добавлено для отправки результата
 
 @dataclass
 class RequestRecord:
@@ -701,7 +702,7 @@ class QueueService:
             'average_processing_time': 0.0
         }
         
-        # Ссылки на обработчики - ИСПРАВЛЕНО
+        # Ссылки на обработчики
         self.bot_handler = None
         self.user_handler = None
         self.bot_client = None
@@ -717,7 +718,7 @@ class QueueService:
         self._task_counter = 0
     
     async def initialize(self, bot_handler=None, user_handler=None, bot_client=None):
-        """Инициализация сервиса очереди - ИСПРАВЛЕНО"""
+        """Инициализация сервиса очереди"""
         try:
             logger.info("🔄 Инициализация QueueService...")
             
@@ -737,8 +738,9 @@ class QueueService:
             raise
     
     async def add_task(self, user_id: int, command: str, chat_id: int = None, 
-                      parameters: Dict[str, Any] = None, priority: int = None) -> int:
-        """Добавить задачу в очередь - ИСПРАВЛЕНО"""
+                      parameters: Dict[str, Any] = None, priority: int = None,
+                      original_event: Any = None) -> int:
+        """Добавить задачу в очередь - ИСПРАВЛЕНО: добавлен original_event"""
         try:
             if priority is None:
                 priority = self._get_command_priority(command)
@@ -764,7 +766,8 @@ class QueueService:
                 parameters=parameters or {},
                 priority=priority,
                 status='pending',
-                created_at=datetime.now()
+                created_at=datetime.now(),
+                original_event=original_event  # ИСПРАВЛЕНО: сохраняем оригинальное событие
             )
             
             # Добавляем в очередь
@@ -778,7 +781,7 @@ class QueueService:
             raise
     
     async def background_worker(self):
-        """Основной процесс обработки очереди - ИСПРАВЛЕНО"""
+        """Основной процесс обработки очереди"""
         logger.info("🔄 Запуск обработки очереди...")
         
         while self.is_processing:
@@ -803,7 +806,7 @@ class QueueService:
                 await asyncio.sleep(5)
     
     async def _process_task(self, task: QueueTask):
-        """Обработка отдельной задачи - ИСПРАВЛЕНО"""
+        """Обработка отдельной задачи - ИСПРАВЛЕНО: реальное выполнение команд"""
         task_id = task.id
         start_time = datetime.now()
         
@@ -821,7 +824,7 @@ class QueueService:
             user_lock = await self._get_user_lock(task.user_id)
             
             async with user_lock:
-                # Выполняем команду
+                # ИСПРАВЛЕНО: Выполняем команду через реальные handlers
                 result = await self._execute_command(task)
                 
                 # Обновляем статистику
@@ -839,71 +842,63 @@ class QueueService:
             
             logger.error(f"❌ Ошибка в задаче {task_id}: {e}")
             
+            # ИСПРАВЛЕНО: Отправляем ошибку пользователю
+            if task.original_event:
+                try:
+                    await task.original_event.reply(f"❌ **Ошибка выполнения команды**\n\n{error_msg}")
+                except Exception as reply_error:
+                    logger.error(f"❌ Ошибка отправки ошибки пользователю: {reply_error}")
+            
         finally:
             # Удаляем из активных
             if task_id in self.processing_tasks:
                 del self.processing_tasks[task_id]
     
     async def _execute_command(self, task: QueueTask) -> Dict[str, Any]:
-        """Выполнение команды задачи - ПОЛНОСТЬЮ РЕАЛИЗОВАНО"""
+        """ИСПРАВЛЕНО: Реальное выполнение команды через handlers"""
         try:
             logger.info(f"🔄 Выполнение команды {task.command} для пользователя {task.user_id}")
             
-            # Создаем mock event для handlers
-            class MockEvent:
-                def __init__(self, task: QueueTask):
-                    self.sender_id = task.user_id
-                    self.chat_id = task.chat_id or task.user_id  # fallback на user_id для ЛС
-                    self.text = f"/{task.command}"
-                    self.is_private = task.chat_id is None
-                    self.message = self
-                    self.id = task.id
-                    
-                async def reply(self, text, **kwargs):
-                    logger.info(f"📤 Mock reply to {self.sender_id}: {text[:100]}...")
-                    
-                async def respond(self, text, **kwargs):
-                    await self.reply(text, **kwargs)
-                    
-                async def edit(self, text, **kwargs):
-                    await self.reply(f"[EDIT] {text}", **kwargs)
-                    
-                async def get_chat(self):
-                    # Mock chat object
-                    class MockChat:
-                        def __init__(self, chat_id):
-                            self.id = chat_id
-                            self.title = f"Chat {chat_id}"
-                            self.megagroup = True
-                            self.forum = True
-                    return MockChat(self.chat_id)
+            # Получаем режим пользователя
+            user_mode = await self._get_user_mode(task.user_id)
             
-            mock_event = MockEvent(task)
-            
-            # Определяем режим пользователя (для простоты всегда bot в тестовом режиме)
-            user_mode = 'bot'  # В реальности здесь был бы запрос к БД
-            
-            # Выполняем команду через соответствующий handler
-            success = False
-            
+            # ИСПРАВЛЕНО: Вызываем реальные handlers с правильными параметрами
             if task.command in ['scan', 'get_all', 'get_users', 'get_ids']:
-                # Эмулируем выполнение команды
-                await asyncio.sleep(1.0)  # Реалистичное время выполнения
-                
-                # Возвращаем успешный результат
-                return {
-                    'status': 'success',
-                    'command': task.command,
-                    'user_id': task.user_id,
-                    'chat_id': task.chat_id,
-                    'processed_at': datetime.now().isoformat(),
-                    'message': f"Команда {task.command} выполнена через очередь",
-                    'queue_processed': True,
-                    'mode': user_mode,
-                    'execution_time': 1.0
-                }
+                if task.original_event:
+                    success = False
+                    
+                    if user_mode == 'user' and self.user_handler:
+                        # Пользовательский режим
+                        success = await self.user_handler.handle_command(task.command, task.original_event, task.id)
+                    elif self.bot_handler:
+                        # Режим бота
+                        success = await self.bot_handler.handle_command(task.command, task.original_event)
+                    
+                    # Результат уже отправлен пользователю через handler
+                    return {
+                        'status': 'success' if success else 'error',
+                        'command': task.command,
+                        'user_id': task.user_id,
+                        'chat_id': task.chat_id,
+                        'processed_at': datetime.now().isoformat(),
+                        'mode': user_mode,
+                        'success': success
+                    }
+                else:
+                    # Если нет оригинального события, не можем выполнить команду
+                    logger.warning(f"⚠️ Нет original_event для задачи {task.id}")
+                    return {
+                        'status': 'error',
+                        'command': task.command,
+                        'user_id': task.user_id,
+                        'error': 'Нет оригинального события для выполнения команды',
+                        'processed_at': datetime.now().isoformat()
+                    }
             else:
                 # Неизвестная команда
+                if task.original_event:
+                    await task.original_event.reply(f"❌ **Неизвестная команда:** {task.command}")
+                
                 return {
                     'status': 'error',
                     'command': task.command,
@@ -914,6 +909,14 @@ class QueueService:
             
         except Exception as e:
             logger.error(f"❌ Ошибка выполнения команды {task.command}: {e}")
+            
+            # Отправляем ошибку пользователю
+            if task.original_event:
+                try:
+                    await task.original_event.reply(f"❌ **Ошибка выполнения команды**\n\n{str(e)}")
+                except Exception as reply_error:
+                    logger.error(f"❌ Ошибка отправки ошибки пользователю: {reply_error}")
+            
             return {
                 'status': 'error',
                 'command': task.command,
@@ -921,6 +924,17 @@ class QueueService:
                 'error': str(e),
                 'processed_at': datetime.now().isoformat()
             }
+    
+    async def _get_user_mode(self, user_id: int) -> str:
+        """Получить режим пользователя"""
+        try:
+            # Получаем режим из базы данных
+            from database import db_manager
+            user_data = await db_manager.get_user(user_id)
+            return user_data.get('mode', 'bot') if user_data else 'bot'
+        except Exception as e:
+            logger.debug(f"Ошибка получения режима пользователя {user_id}: {e}")
+            return 'bot'
     
     async def _get_user_lock(self, user_id: int) -> asyncio.Lock:
         """Получить блокировку пользователя"""
@@ -985,7 +999,7 @@ class QueueService:
             logger.error(f"❌ Ошибка сброса зависших задач: {e}")
     
     async def get_queue_status(self) -> Dict[str, Any]:
-        """Получить статус очереди - ИСПРАВЛЕНО"""
+        """Получить статус очереди"""
         try:
             status = {
                 'pending': self._internal_queue.qsize(),
